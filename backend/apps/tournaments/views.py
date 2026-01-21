@@ -1,10 +1,11 @@
+from django.db import models
+from django.db.models import Sum, Q, Value, IntegerField
+from django.db.models.functions import Coalesce
+from django.utils import timezone
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-
-from django.db import models
-from django.db.models import Sum
-from django.utils import timezone
 
 from apps.courses.models import Hole
 from apps.tournaments.models import Tournament, HoleResult
@@ -15,10 +16,16 @@ from apps.tournaments.services.scoring import simulate_strokes_for_entry
 
 
 class TournamentViewSet(viewsets.ModelViewSet):
-    queryset = Tournament.objects.all().prefetch_related(
-        "entries",
-        "groups__members__entry",
-        "groups__members__entry__golfer",
+    queryset = (
+        Tournament.objects.all()
+        .prefetch_related(
+            "entries",
+            "entries__hole_results",
+            "groups",
+            "groups__members",
+            "groups__members__entry",
+            "groups__members__entry__golfer",
+        )
     )
     serializer_class = TournamentSerializer
 
@@ -36,15 +43,16 @@ class TournamentViewSet(viewsets.ModelViewSet):
     def _recompute_positions(self, tournament: Tournament):
         """
         Set entry.position with ties sharing the same rank.
-        Uses tournament_strokes as the ordering.
+        Uses tournament_strokes as ordering (lowest is best).
         """
         entries = list(tournament.entries.order_by("tournament_strokes", "id"))
         last_score = None
         rank = 0
         for i, e in enumerate(entries, start=1):
-            if last_score is None or e.tournament_strokes != last_score:
+            score = getattr(e, "tournament_strokes", None)
+            if last_score is None or score != last_score:
                 rank = i
-                last_score = e.tournament_strokes
+                last_score = score
             e.position = rank
             e.save(update_fields=["position"])
 
@@ -60,8 +68,14 @@ class TournamentViewSet(viewsets.ModelViewSet):
     ):
         """
         Recreate groups for the current round.
-        - R1/R2: foursomes, split tees (1/10). R2 should invert_split=True to swap waves.
-        - R3/R4: twosomes, single tee (1), leaders_last=True.
+
+        Custom sim rules:
+        - Humans are packed together as much as possible.
+        - If humans require multiple groups, all human-containing groups get the SAME tee time.
+
+        PGA-ish defaults:
+        - R1/R2: foursomes, split tees 1/10, invert waves in R2
+        - R3/R4: twosomes, single tee 1, reseed by score so leaders go last
         """
         from apps.tournaments.models import Group, GroupMember
 
@@ -76,20 +90,50 @@ class TournamentViewSet(viewsets.ModelViewSet):
         if tournament.cut_applied and tournament.current_round >= 3:
             entries_qs = entries_qs.filter(cut=False)
 
-        # order for pairing
-        # - weekday: stable by id (or keep by tournament_strokes if you want)
-        # - weekend leaders_last: best go last
+        # ordering
         if leaders_last:
-            entries = list(entries_qs.order_by("tournament_strokes", "id"))
-            entries = list(reversed(entries))
+            # Sort by PRIOR rounds cumulative strokes: worst first => earliest tee, best last => leaders last.
+            prior_total = Coalesce(
+                Sum(
+                    "hole_results__strokes",
+                    filter=Q(hole_results__round_number__lt=tournament.current_round),
+                ),
+                Value(10_000),
+                output_field=IntegerField(),
+            )
+            entries = list(
+                entries_qs.annotate(prior_total=prior_total).order_by("-prior_total", "id")
+            )
         else:
+            # Early rounds: stable by id (we’ll pack humans together below)
             entries = list(entries_qs.order_by("id"))
+
+        # pack humans together (as much as possible)
+        humans = [e for e in entries if e.is_human]
+        bots = [e for e in entries if not e.is_human]
+
+        if humans:
+            packed = []
+            idx = 0
+            while idx < len(humans):
+                chunk = humans[idx : idx + group_size]
+                idx += group_size
+                fill = group_size - len(chunk)
+                if fill > 0 and bots:
+                    chunk.extend(bots[:fill])
+                    bots = bots[fill:]
+                packed.extend(chunk)
+            packed.extend(bots)
+            entries = packed
 
         groups_count = (len(entries) + group_size - 1) // group_size
         split_point = (groups_count + 1) // 2
 
+        human_groups = []
+
         for gi, i in enumerate(range(0, len(entries), group_size)):
-            # Determine tee (and wave) per-group
+            group_entries = entries[i : i + group_size]
+
             if split_tees:
                 is_wave1 = gi < split_point
                 start_hole = 1 if is_wave1 else 10
@@ -113,15 +157,27 @@ class TournamentViewSet(viewsets.ModelViewSet):
                 is_finished=False,
             )
 
-            for e in entries[i : i + group_size]:
+            for e in group_entries:
                 GroupMember.objects.create(group=g, entry=e)
 
+            if any(e.is_human for e in group_entries):
+                human_groups.append(g)
+
+        # enforce same tee time for ALL human groups
+        if len(human_groups) > 1:
+            common_time = min(g.tee_time for g in human_groups)
+            for g in human_groups:
+                if g.tee_time != common_time or g.next_action_time != common_time:
+                    g.tee_time = common_time
+                    g.next_action_time = common_time
+                    g.save(update_fields=["tee_time", "next_action_time"])
+
         # reset per-round display fields for the new round
-        tournament.entries.update(thru_hole=0, total_strokes=0)
+        tournament.entries.update(thru_hole=0, total_strokes=0, position=None)
 
     def _apply_cut(self, tournament: Tournament):
         """
-        Apply cut after round 2: top 65 + ties (based on rounds 1+2).
+        Apply cut after round 2: top 65 + ties (based on rounds 1+2 strokes).
         """
         totals = (
             tournament.entries.annotate(
@@ -156,9 +212,9 @@ class TournamentViewSet(viewsets.ModelViewSet):
     def _update_entry_totals(self, entry, round_number: int):
         """
         Updates:
-        - thru_hole (already set by caller)
-        - total_strokes for the round
+        - total_strokes for the given round
         - tournament_strokes cumulative across all rounds
+        Does NOT blindly advance thru_hole (caller decides that).
         """
         entry.total_strokes = (
             HoleResult.objects.filter(entry=entry, round_number=round_number)
@@ -174,7 +230,9 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def tick(self, request, pk=None):
-        tournament = self.get_object()
+        # Use prefetched queryset explicitly to avoid N+1 surprises
+        tournament = self.get_queryset().get(pk=pk)
+
         minutes = int(request.data.get("minutes", 11))
 
         # advance tournament clock
@@ -182,7 +240,9 @@ class TournamentViewSet(viewsets.ModelViewSet):
         tournament.status = "in_progress"
         tournament.save(update_fields=["current_time", "status"])
 
-        course_holes = {h.number: h for h in Hole.objects.filter(course=tournament.course).all()}
+        course_holes = {
+            h.number: h for h in Hole.objects.filter(course=tournament.course).all()
+        }
 
         for group in tournament.groups.all():
             if group.is_finished:
@@ -191,10 +251,12 @@ class TournamentViewSet(viewsets.ModelViewSet):
             if group.next_action_time is None:
                 group.next_action_time = group.tee_time
 
+            # group hasn't started yet
             if group.tee_time > tournament.current_time:
                 continue
 
-            while (not group.is_finished) and (group.next_action_time <= tournament.current_time):
+            # advance while we have time to complete the next hole
+            while (not group.is_finished) and (group.next_action_time < tournament.current_time):
                 hole_num = next_hole(group.start_hole, group.holes_completed)
                 hole = course_holes.get(hole_num)
                 if not hole:
@@ -216,13 +278,31 @@ class TournamentViewSet(viewsets.ModelViewSet):
                         round_number=tournament.current_round,
                         hole_number=hole_num,
                         defaults={
-                            "strokes": simulate_strokes_for_entry(entry, hole, tournament.current_round)
+                            "strokes": simulate_strokes_for_entry(
+                                entry, hole, tournament.current_round
+                            )
                         },
                     )
 
-                # recompute totals for group entries (humans will only count holes they've entered)
+                # recompute totals for entries in this group
+                # IMPORTANT: humans only advance thru_hole if they actually submitted for this hole.
                 for gm in members:
                     entry = gm.entry
+
+                    if entry.is_human:
+                        has_result = HoleResult.objects.filter(
+                            entry=entry,
+                            round_number=tournament.current_round,
+                            hole_number=hole_num,
+                        ).exists()
+
+                        if has_result:
+                            entry.thru_hole = max(entry.thru_hole, hole_num)
+                        # Always update totals (may be unchanged)
+                        self._update_entry_totals(entry, tournament.current_round)
+                        continue
+
+                    # bot
                     entry.thru_hole = max(entry.thru_hole, hole_num)
                     self._update_entry_totals(entry, tournament.current_round)
 
@@ -237,7 +317,7 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
             group.save(update_fields=["current_hole", "holes_completed", "next_action_time", "is_finished"])
 
-        # update positions on every tick
+        # update positions after processing this tick
         self._recompute_positions(tournament)
 
         # rollover + cut
@@ -251,7 +331,6 @@ class TournamentViewSet(viewsets.ModelViewSet):
                 tournament.save(update_fields=["current_round"])
 
                 if tournament.current_round <= 2:
-                    # round 2 flips tee waves
                     invert = (tournament.current_round == 2)
                     self._reseed_groups(
                         tournament,
@@ -260,13 +339,16 @@ class TournamentViewSet(viewsets.ModelViewSet):
                         invert_split=invert,
                     )
                 else:
-                    # weekend: single tee, twosomes, leaders last
                     self._reseed_groups(
                         tournament,
                         split_tees=False,
                         group_size=2,
                         leaders_last=True,
                     )
+
+                # After reseed, positions were nulled; recompute based on cumulative strokes
+                self._recompute_positions(tournament)
+
             else:
                 tournament.status = "finished"
                 tournament.save(update_fields=["status"])
@@ -277,7 +359,8 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="hole-result")
     def hole_result(self, request, pk=None):
-        tournament = self.get_object()
+        tournament = self.get_queryset().get(pk=pk)
+
         entry_id = int(request.data["entry_id"])
         hole_number = int(request.data["hole_number"])
         round_number = int(request.data.get("round_number", tournament.current_round))
@@ -292,6 +375,7 @@ class TournamentViewSet(viewsets.ModelViewSet):
             defaults={"strokes": strokes},
         )
 
+        # Only advance thru_hole for that entry for that round
         entry.thru_hole = max(entry.thru_hole, hole_number)
         self._update_entry_totals(entry, round_number)
 
