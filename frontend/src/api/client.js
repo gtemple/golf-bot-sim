@@ -22,10 +22,15 @@ export const api = {
   listCourses: () => apiFetch('/courses/'),
   getCourse: (id) => apiFetch(`/courses/${id}/`),
   listGolfers: () => apiFetch('/golfers/'),
+  listTournaments: () => apiFetch('/tournaments/'),
   createTournament: (payload) => apiFetch('/tournaments/', { method: 'POST', body: payload }),
   getTournament: (id) => apiFetch(`/tournaments/${id}/`),
   tickTournament: (id, minutes = 11) =>
     apiFetch(`/tournaments/${id}/tick/`, { method: 'POST', body: { minutes } }),
+  simToTee: (id) =>
+    apiFetch(`/tournaments/${id}/sim-to-tee/`, { method: 'POST' }),
   submitHoleResult: (id, payload) =>
     apiFetch(`/tournaments/${id}/hole-result/`, { method: 'POST', body: payload }),
+  simToEndOfDay: (id) =>
+    apiFetch(`/tournaments/${id}/sim-to-end-of-day/`, { method: 'POST' }),
 }
