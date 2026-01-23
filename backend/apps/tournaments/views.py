@@ -8,11 +8,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.courses.models import Hole
-from apps.tournaments.models import Tournament, HoleResult
+from apps.tournaments.models import Tournament, HoleResult, TournamentEvent
 from apps.tournaments.serializers import TournamentSerializer, TournamentCreateSerializer
 from apps.tournaments.services.pace import minutes_for_hole
 from apps.tournaments.services.routing import next_hole
-from apps.tournaments.services.scoring import simulate_strokes_for_entry
+from apps.tournaments.services.scoring import simulate_strokes_for_entry, simulate_strokes_for_entry_with_stats
 
 
 class TournamentViewSet(viewsets.ModelViewSet):
@@ -25,6 +25,7 @@ class TournamentViewSet(viewsets.ModelViewSet):
             "groups__members",
             "groups__members__entry",
             "groups__members__entry__golfer",
+            "groups__members__entry__hole_results", # Ensure stats are loaded for sidebar
         )
     )
     serializer_class = TournamentSerializer
@@ -39,6 +40,88 @@ class TournamentViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         tournament = serializer.save()
         return Response(TournamentSerializer(tournament).data, status=status.HTTP_201_CREATED)
+
+    def _archive_match_results(self, tournament):
+        """
+        Calculate results for all groups in the current round and store in session_history.
+        """
+        # Load course pars
+        holes_map = {h.number: h for h in Hole.objects.filter(course=tournament.course)}
+        
+        results = []
+        
+        for group in tournament.groups.all():
+            members = list(group.members.all())
+            if not members:
+                continue
+            
+            # Identify teams
+            # In Four-Ball (4 members): 2 USA, 2 EUR
+            # In Singles (2 members): 1 USA, 1 EUR
+            
+            # Prefetched entries might not return hole_results properly if generic prefetch
+            # But we added it in queryset
+            
+            usa_entries = [m.entry for m in members if m.entry.team == 'USA']
+            eur_entries = [m.entry for m in members if m.entry.team != 'USA']
+            
+            if not usa_entries or not eur_entries:
+                continue
+                
+            # Calculate match outcome
+            usa_holes = 0
+            eur_holes = 0
+            
+            # Helper to get best score for a side on a hole
+            def get_best_score(entries, hole_num):
+                best = 999
+                # Need to fetch hole result from DB or via prefetch
+                scores = []
+                for e in entries:
+                     # Access pre-fetched hole_results (filtered by round?? No, contains all)
+                     # We need to filter manually in Python
+                     hr = next((r for r in e.hole_results.all() if r.hole_number == hole_num and r.round_number == tournament.current_round), None)
+                     if hr:
+                         scores.append(hr.strokes)
+                return min(scores) if scores else None
+
+            processed_holes = 0
+            # Iterate 1..18
+            for h_num in range(1, 19):
+                s1 = get_best_score(usa_entries, h_num)
+                s2 = get_best_score(eur_entries, h_num)
+                
+                if s1 is not None and s2 is not None:
+                    processed_holes += 1
+                    if s1 < s2: usa_holes += 1
+                    elif s2 < s1: eur_holes += 1
+            
+            winner = 'Halved'
+            score_display = 'Halved'
+            margin = abs(usa_holes - eur_holes)
+            
+            # Determine winner
+            if usa_holes > eur_holes:
+                winner = 'USA'
+            elif eur_holes > usa_holes:
+                winner = 'EUR'
+                
+            if margin > 0:
+                 score_display = f"{margin} UP"
+            
+            results.append({
+                "group_id": group.id,
+                "winner": winner,
+                "margin": margin,
+                "score": score_display,
+                "usa_names": [e.display_name for e in usa_entries],
+                "eur_names": [e.display_name for e in eur_entries]
+            })
+            
+        history = tournament.session_history or {}
+        history[f"R{tournament.current_round}"] = results
+        tournament.session_history = history
+        tournament.save(update_fields=["session_history"])
 
     def _recompute_positions(self, tournament: Tournament):
         """
@@ -65,6 +148,7 @@ class TournamentViewSet(viewsets.ModelViewSet):
         leaders_last: bool = False,
         invert_split: bool = False,
         tee_interval_minutes: int = 11,
+        playoff: bool = False,
     ):
         """
         Recreate groups for the current round.
@@ -87,11 +171,57 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
         # choose field
         entries_qs = tournament.entries.all()
-        if tournament.cut_applied and tournament.current_round >= 3:
+        
+        if playoff:
+            # Only include tied leaders
+            entries_qs = entries_qs.filter(position=1)
+        elif tournament.cut_applied and tournament.current_round >= 3:
             entries_qs = entries_qs.filter(cut=False)
 
         # ordering
-        if leaders_last:
+
+        if invert_split:
+            # Sort by PRIOR rounds cumulative strokes: worst first => earliest tee, best last => leaders last.
+            prior_total = Coalesce(
+                Sum(
+                    "hole_results__strokes",
+                    filter=Q(hole_results__round_number__lt=tournament.current_round),
+                ),
+                Value(10_000),
+                output_field=IntegerField(),
+            )
+            entries = list(
+                entries_qs.annotate(prior_total=prior_total).order_by("-prior_total", "id")
+            )
+        elif tournament.format == 'match':
+             # Match Play Logic
+             all_entries = list(entries_qs)
+             usa = [e for e in all_entries if e.team == 'USA']
+             eur = [e for e in all_entries if e.team != 'USA']
+             
+             # Shuffle for random pairing
+             import random
+             random.shuffle(usa)
+             random.shuffle(eur)
+             
+             pairs = []
+             # If group_size is 4, we need 2 USA / 2 EUR
+             # If group_size is 2, we need 1 USA / 1 EUR
+             
+             if group_size == 4:
+                 for i in range(0, max(len(usa), len(eur)), 2):
+                    if i < len(usa): pairs.append(usa[i])
+                    if i+1 < len(usa): pairs.append(usa[i+1])
+                    if i < len(eur): pairs.append(eur[i])
+                    if i+1 < len(eur): pairs.append(eur[i+1])
+             else:
+                 max_len = max(len(usa), len(eur))
+                 for i in range(max_len):
+                    if i < len(usa): pairs.append(usa[i])
+                    if i < len(eur): pairs.append(eur[i])
+             
+             entries = pairs
+        elif leaders_last:
             # Sort by PRIOR rounds cumulative strokes: worst first => earliest tee, best last => leaders last.
             prior_total = Coalesce(
                 Sum(
@@ -114,16 +244,24 @@ class TournamentViewSet(viewsets.ModelViewSet):
         humans = [e for e in entries if e.is_human]
         bots = [e for e in entries if not e.is_human]
 
-        if humans and leaders_last:
+        if tournament.format == 'match':
+            pass
+        elif humans and leaders_last:
             # For rounds 3-4, insert human group based on best human's score
             best_human_score = min(h.prior_total for h in humans) if humans else 10_000
             
             # Find insertion point: where this score would place them among bots
-            insertion_idx = 0
+            # Bots are sorted Worst -> Best (High Score -> Low Score)
+            # We want to insert just before the first bot who is BETTER (Lower Score) than human.
+            insertion_idx = len(bots) # Default: Human is best (lowest score), goes last
+            
             for i, bot in enumerate(bots):
-                if bot.prior_total < best_human_score:
-                    insertion_idx = i + 1
-                else:
+                if bot.prior_total <= best_human_score:
+                    # Found a bot with same or better score.
+                    # Insert human here (before them).
+                    # Since list is Worst -> Best drop-off, the first one we find <= Human
+                    # is the cut-off point where Humans belong.
+                    insertion_idx = i
                     break
             
             # Insert all humans at this position (keeps them together)
@@ -233,6 +371,109 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
         tournament.cut_applied = True
         tournament.save(update_fields=["cut_applied"])
+
+    def _update_projected_cut(self, tournament: Tournament):
+        """
+        Calculates the projected cut score (Top 65 & ties) based on current live scores.
+        Only valid for R1 & R2.
+        """
+        if tournament.current_round > 2:
+            return
+
+        # We need the "Total Score" relative to par effectively.
+        # But wait, raw strokes depends on how many holes played.
+        # "Score to Par" is the universal metric.
+        # But we don't store "Score to Par" on the entry directly, we calculate it.
+        # Actually, tournament_strokes is just sum of strokes. 
+        # Comparing raw strokes is unfair if someone played 9 holes vs 18 holes.
+        # So we MUST calculate Score To Par for everyone.
+        
+        # Optimization: Score To Par = Total Strokes - (Par of holes completed)
+        # We can calculate this.
+        
+        entries = list(tournament.entries.all())
+        scores = []
+        
+        # Get all hole pars once
+        holes = Hole.objects.filter(course=tournament.course).order_by('number')
+        par_map = {h.number: h.par for h in holes}
+        
+        # Prefetch hole results for efficiency? 
+        # They are already in tournament.entries via prefetch in ViewSet, 
+        # but that might be stale in 'tick'.
+        # Let's rely on tournament_strokes from _recompute_positions?
+        # tournament_strokes has total strokes.
+        # We need total par for holes played.
+        
+        # This is expensive to do every tick for 150 players.
+        # Let's do a simplified version or just iterate.
+        # 150 iterations is nothing for Python.
+        
+        for entry in entries:
+            # Get holes played count: this is hard because 'thru_hole' is per round.
+            # We need all holes played across all rounds.
+            # Simpler: We know in R1 everyone played 'thru_hole' holes.
+            # in R2 everyone played 18 (R1) + 'thru_hole' (R2).
+            
+            # Actually, `tournament_strokes` is reliable `sum(strokes)`.
+            # We just need `sum(par)` for those specific holes.
+            
+            # Calculate Total Par so far
+            # How do we know EXACTLY which holes they played?
+            # We assume order 1..18.
+            # R1: holes 1..thru_hole
+            # R2: 1..18 (R1) + 1..thru_hole (R2)
+            
+            # Caveat: Split tees start at 10.
+            # If start at 10, played 10,11,12...
+            # This logic gets complex with split tees.
+            
+            # Alternative: Projected Cut is usually based on "End of Round 2".
+            # If I am +2 thru 9, I am projected +2.
+            # So "Score to Par" is correct.
+            
+            # To get Score To Par correctly without complex par summing:
+            # We can aggregate from HoleResult stats if we stored 'par' there. We don't.
+            # But we can query HoleResult count? No.
+            
+            # Let's assume standard pars for now (Par 72).
+            # No, that's wrong.
+            
+            # Correct approach:
+            # Calculate score_to_par for each entry.
+            # entry.score_to_par property?
+            pass
+            
+            # Let's check if we have a helper for this.
+            # We don't.
+            # Let's just calculate it.
+            
+            total_strokes = entry.tournament_strokes
+            
+            # Calculate par for holes played
+            # This requires knowing WHICH holes.
+            # We can fetch all HoleResults for this entry.
+            results = entry.hole_results.all() # Prefitched?
+            
+            # If we blindly trust prefetch:
+            total_par = 0
+            for hr in results:
+                # We need par of hr.hole_number
+                p = par_map.get(hr.hole_number, 4)
+                total_par += p
+            
+            score_to_par = total_strokes - total_par
+            scores.append(score_to_par)
+            
+        scores.sort()
+        
+        # Top 65 (index 64)
+        cut_size = tournament.cut_size or 65
+        if len(scores) > cut_size:
+            projected_cut = scores[cut_size - 1]
+            tournament.projected_cut_score = projected_cut
+            tournament.save(update_fields=["projected_cut_score"])
+
 
     def _update_entry_totals(self, entry, round_number: int):
         """
@@ -447,14 +688,11 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
             # group hasn't started yet
             if group.tee_time > tournament.current_time:
-                print(f"DEBUG: Group {group.id} hasn't started: tee_time={group.tee_time} > current={tournament.current_time}")
                 continue
 
             # advance while we have time to complete the next hole
-            print(f"DEBUG: Group {group.id} check: next_action={group.next_action_time} vs current={tournament.current_time}, holes_completed={group.holes_completed}")
             while (not group.is_finished) and (group.next_action_time <= tournament.current_time):
                 hole_num = next_hole(group.start_hole, group.holes_completed)
-                print(f"DEBUG: Group {group.id} advancing to hole {hole_num}, currently completed {group.holes_completed}")
                 hole = course_holes.get(hole_num)
                 if not hole:
                     group.is_finished = True
@@ -480,16 +718,43 @@ class TournamentViewSet(viewsets.ModelViewSet):
                     if entry.is_human or entry.golfer_id is None:
                         continue
 
-                    HoleResult.objects.get_or_create(
+                    # Simulate strokes and stats
+                    strokes, stats = simulate_strokes_for_entry_with_stats(
+                        entry, hole, tournament.current_round
+                    )
+                    hr, created = HoleResult.objects.get_or_create(
                         entry=entry,
                         round_number=tournament.current_round,
                         hole_number=hole_num,
                         defaults={
-                            "strokes": simulate_strokes_for_entry(
-                                entry, hole, tournament.current_round
-                            )
+                            "strokes": strokes,
+                            "stats": stats
                         },
                     )
+                    
+                    if created:
+                        # Log significant events
+                        diff = strokes - hole.par
+                        
+                        if diff <= -1:
+                            term = "Birdie" if diff == -1 else "Eagle" if diff == -2 else "Albatross"
+                            text = f"{entry.display_name} made {term} on #{hole_num}."
+                            imp = 2 if diff == -1 else 3
+                            TournamentEvent.objects.create(
+                                tournament=tournament,
+                                round_number=tournament.current_round,
+                                text=text,
+                                importance=imp
+                            )
+                        elif diff >= 2:
+                            term = "Double Bogey" if diff == 2 else "Triple Bogey"
+                            text = f"{entry.display_name} made {term} on #{hole_num}."
+                            TournamentEvent.objects.create(
+                                tournament=tournament,
+                                round_number=tournament.current_round,
+                                text=text,
+                                importance=1
+                            )
 
                 # recompute totals for entries in this group
                 # IMPORTANT: humans only advance thru_hole if they actually submitted for this hole.
@@ -533,9 +798,18 @@ class TournamentViewSet(viewsets.ModelViewSet):
         # update positions after processing this tick
         self._recompute_positions(tournament)
 
+        # update projected cut
+        if tournament.current_round <= 2:
+             self._update_projected_cut(tournament)
+
         # rollover + cut
         all_finished = tournament.groups.filter(is_finished=False).count() == 0
         if all_finished:
+            
+            # Archive match results if Ryder Cup
+            if tournament.format == 'match':
+                self._archive_match_results(tournament)
+            
             if tournament.current_round == 2 and not tournament.cut_applied:
                 self._apply_cut(tournament)
 
@@ -543,7 +817,25 @@ class TournamentViewSet(viewsets.ModelViewSet):
                 tournament.current_round += 1
                 tournament.save(update_fields=["current_round"])
 
-                if tournament.current_round <= 2:
+                # Ryder Cup Transition Logic
+                if tournament.format == 'match':
+                    # Round 2: Singles (1v1)
+                    if tournament.current_round == 2:
+                        self._reseed_groups(
+                            tournament,
+                            split_tees=False, # Match play usually one tee
+                            group_size=2,     # Singles
+                            leaders_last=False
+                        )
+                    # Round 3: Singles (Final) - or just finish after 2 rounds as requested
+                    elif tournament.current_round == 3:
+                        # User asked for "2 day event". So if we just finished R2, we are effectively done.
+                        # But loop says if current_round < 4.
+                        # Let's force finish
+                        tournament.status = "finished"
+                        tournament.save(update_fields=["status"])
+                
+                elif tournament.current_round <= 2:
                     invert = (tournament.current_round == 2)
                     self._reseed_groups(
                         tournament,
@@ -559,16 +851,99 @@ class TournamentViewSet(viewsets.ModelViewSet):
                         leaders_last=True,
                     )
 
+
                 # After reseed, positions were nulled; recompute based on cumulative strokes
                 self._recompute_positions(tournament)
 
             else:
-                tournament.status = "finished"
-                tournament.save(update_fields=["status"])
+                # End of Regulation (Round 4 or Match Play end)
+                # Check for Sudden Death Playoff?
+                # Usually only for Stroke play
+                if tournament.format == 'stroke' and tournament.current_round >= 4:
+                    # Check for ties at position 1
+                    winners = list(tournament.entries.filter(position=1))
+                    if len(winners) > 1:
+                        # Tie! Start Playoff
+                        tournament.status = "playoff"
+                        tournament.current_round += 1
+                        tournament.save(update_fields=["status", "current_round"])
+                        
+                        self._reseed_groups(
+                            tournament,
+                            split_tees=False,
+                            group_size=len(winners), # All tied players in one group (max 4 usually)
+                            playoff=True
+                        )
+                        # Recompute to ensure positions are correct
+                        self._recompute_positions(tournament)
+                    else:
+                        tournament.status = "finished"
+                        tournament.save(update_fields=["status"])
+                else:
+                    tournament.status = "finished"
+                    tournament.save(update_fields=["status"])
 
         # re-fetch to avoid stale prefetch caches after reseeding
         tournament = self.get_queryset().get(pk=tournament.pk)
         return Response(TournamentSerializer(tournament).data)
+
+    @action(detail=True, methods=["post"], url_path="shuffle-pairings")
+    def shuffle_pairings(self, request, pk=None):
+        """
+        Re-randomize the match pairings for a Ryder Cup style tournament.
+        Only allowed if no holes have been completed.
+        """
+        tournament = self.get_object()
+        if tournament.groups.filter(holes_completed__gt=0).exists():
+            return Response(
+                {"error": "Cannot shuffle pairings after play has started."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 1. Collect all entries
+        entries = list(tournament.entries.all())
+        
+        # 2. Separate into teams
+        usa = [e for e in entries if e.team == 'USA']
+        eur = [e for e in entries if e.team != 'USA']
+        
+        # 3. Shuffle both lists
+        import random
+        random.shuffle(usa)
+        random.shuffle(eur)
+        
+        # 4. Re-assign to existing groups?
+        # Simpler: Delete existing groups and recreate? 
+        # But groups have tee times.
+        # Best: Update the GroupMembers in place.
+        
+        groups = list(tournament.groups.all().order_by('tee_time'))
+        
+        from apps.tournaments.models import GroupMember
+        
+        # Clear all members
+        GroupMember.objects.filter(group__in=groups).delete()
+        
+        # Create new pairs
+        # Zip them up
+        max_len = max(len(usa), len(eur))
+        pair_idx = 0
+        
+        for i in range(max_len):
+            if pair_idx >= len(groups):
+                break
+            
+            g = groups[pair_idx]
+            
+            p1 = usa[i] if i < len(usa) else None
+            p2 = eur[i] if i < len(eur) else None
+            
+            if p1: GroupMember.objects.create(group=g, entry=p1)
+            if p2: GroupMember.objects.create(group=g, entry=p2)
+            
+            pair_idx += 1
+            
+        return Response({"status": "shuffled"})
 
     @action(detail=True, methods=["post"], url_path="hole-result")
     def hole_result(self, request, pk=None):

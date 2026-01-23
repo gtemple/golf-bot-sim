@@ -122,14 +122,21 @@ export default function TournamentListPage() {
             {tournaments.map(t => (
               <div 
                 key={t.id}
-                onClick={() => navigate(`/t/${t.id}`)}
+                onClick={() => navigate(t.format === 'match' ? `/ryder/${t.id}` : `/t/${t.id}`)}
                 className="group bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden cursor-pointer hover:shadow-xl hover:border-green-300 transition-all duration-200"
               >
                 <div className="px-6 py-5 bg-gradient-to-r from-gray-50 to-white border-b border-gray-100">
                   <div className="flex justify-between items-start mb-3">
-                    <h3 className="text-xl font-bold text-gray-900 group-hover:text-green-700 transition-colors line-clamp-1">
-                      {t.name}
-                    </h3>
+                    <div>
+                      <h3 className="text-xl font-bold text-gray-900 group-hover:text-green-700 transition-colors line-clamp-1">
+                        {t.name}
+                      </h3>
+                      {t.format === 'match' && (
+                        <span className="inline-block mt-1 px-2 py-0.5 bg-blue-100 text-blue-800 text-[10px] font-bold rounded-full uppercase tracking-wide">
+                          Ryder Cup Mode
+                        </span>
+                      )}
+                    </div>
                   </div>
                   {getStatusBadge(t.status)}
                 </div>

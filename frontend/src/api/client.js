@@ -29,6 +29,8 @@ export const api = {
     apiFetch(`/tournaments/${id}/tick/`, { method: 'POST', body: { minutes } }),
   simToTee: (id) =>
     apiFetch(`/tournaments/${id}/sim-to-tee/`, { method: 'POST' }),
+  shufflePairings: (id) =>
+    apiFetch(`/tournaments/${id}/shuffle-pairings/`, { method: 'POST' }),
   submitHoleResult: (id, payload) =>
     apiFetch(`/tournaments/${id}/hole-result/`, { method: 'POST', body: payload }),
   simToEndOfDay: (id) =>

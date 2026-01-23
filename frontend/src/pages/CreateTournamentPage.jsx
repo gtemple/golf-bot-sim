@@ -19,11 +19,25 @@ export default function CreateTournamentPage() {
   const [courseId, setCourseId] = useState('')
   const [golferCount, setGolferCount] = useState(3)
   const [fieldType, setFieldType] = useState('top_ranked')
+  const [format, setFormat] = useState('stroke')
 
   const [humans, setHumans] = useState([
-    { name: 'Giordano', country: 'CAN', handedness: 'L', avatar_color: '#3B82F6' }
+    { name: 'Giordano', country: 'CAN', team: 'EUR', handedness: 'L', avatar_color: '#3B82F6' }
   ])
   const avatarColors = ['#3B82F6', '#22C55E', '#F97316', '#A855F7', '#EF4444', '#14B8A6', '#64748B']
+
+  useEffect(() => {
+     if (format.startsWith('match')) {
+         // Ryder Cup Reality: 12 vs 12 = 24 total players.
+         // Minus the humans we are adding.
+         // Actually, let's just ask for 24 bots and we'll have extras or the backend can handle it.
+         // If we want EXACTLY 24 total entries (humans + bots):
+         // setGolferCount(Math.max(0, 24 - humans.length))
+         // But simplify: standard Ryder Cup is 24 players.
+         // Let's set bot count to (24 - humans)
+         setGolferCount(Math.max(0, 24 - humans.length))
+     }
+  }, [format, humans.length])
 
   useEffect(() => {
     let alive = true
@@ -45,8 +59,12 @@ export default function CreateTournamentPage() {
     return () => { alive = false }
   }, [])
 
-  const addHuman = () =>
-    setHumans(h => [...h, { name: '', country: 'CAN', handedness: 'R', avatar_color: avatarColors[0] }])
+  const addHuman = () => {
+    if (format.startsWith('match') && humans.length >= 24) {
+        return; // Fixed roster size
+    }
+    setHumans(h => [...h, { name: '', country: 'CAN', team: 'EUR', handedness: 'R', avatar_color: avatarColors[0] }])
+  }
 
   const removeHuman = (idx) => setHumans(h => h.filter((_, i) => i !== idx))
 
@@ -69,18 +87,20 @@ export default function CreateTournamentPage() {
       const payload = {
         name,
         course_id: Number(courseId),
+        format,
         golfer_count: Number(golferCount),
         field_type: fieldType,
         humans: cleanHumans.map(h => ({
           name: h.name,
           country: h.country,
+          team: h.team,
           handedness: h.handedness,
           avatar_color: h.avatar_color,
         }))
       }
 
       const t = await api.createTournament(payload)
-      navigate(`/t/${t.id}`)
+      navigate(t.format === 'match' ? `/ryder/${t.id}` : `/t/${t.id}`)
     } catch (e2) {
       setErr(e2.message || String(e2))
     }
@@ -156,6 +176,18 @@ export default function CreateTournamentPage() {
               </div>
 
               <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Game Format</label>
+                <select
+                  value={format}
+                  onChange={e => setFormat(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none transition-all"
+                >
+                  <option value="stroke">Stroke Play (Standard)</option>
+                  <option value="match_fourball">Ryder Cup Mode (2-Day/Match Play)</option>
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">Course</label>
                 <select
                   value={courseId}
@@ -178,9 +210,12 @@ export default function CreateTournamentPage() {
                   max={golfers.length}
                   value={golferCount}
                   onChange={e => setGolferCount(Number(e.target.value))}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none transition-all"
+                  disabled={format.startsWith('match')} 
+                  className={`w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none transition-all ${format.startsWith('match') ? 'bg-gray-100 text-gray-500' : ''}`}
                 />
-                <p className="text-xs text-gray-500 mt-1">Total available bots: {golfers.length}</p>
+                <p className="text-xs text-gray-500 mt-1">
+                    {format.startsWith('match') ? 'Fixed for Ryder Cup (Total 24 players)' : `Total available bots: ${golfers.length}`}
+                </p>
               </div>
 
               <div>
@@ -225,7 +260,7 @@ export default function CreateTournamentPage() {
                 >
                   <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
                     {/* Row 1 */}
-                    <div className="md:col-span-6">
+                    <div className={format.startsWith('match') ? "md:col-span-4" : "md:col-span-6"}>
                       <label className="block text-xs font-semibold text-gray-500 mb-1">Name</label>
                       <input
                         placeholder="Player Name"
@@ -234,6 +269,20 @@ export default function CreateTournamentPage() {
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none"
                       />
                     </div>
+
+                    {format.startsWith('match') && (
+                      <div className="md:col-span-2">
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Team</label>
+                        <select
+                          value={h.team || 'USA'}
+                          onChange={e => updateHuman(idx, { team: e.target.value })}
+                          className="w-full px-3 py-2 border border-blue-300 bg-blue-50/50 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-bold text-gray-800"
+                        >
+                          <option value="USA">USA</option>
+                          <option value="EUR">EUR</option>
+                        </select>
+                      </div>
+                    )}
 
                     <div className="md:col-span-3">
                       <label className="block text-xs font-semibold text-gray-500 mb-1">Country</label>

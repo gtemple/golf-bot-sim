@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   Trophy,
@@ -105,6 +105,32 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
     if (v === 0) return 'text-gray-100'
     return 'text-red-100'
   }
+  
+  // Calculate scoring breakdown
+  const scoring = useMemo(() => {
+    if (!player?.hole_results) return {}
+    const counts = { eagle: 0, birdie: 0, par: 0, bogey: 0, double: 0 }
+    
+    player.hole_results.forEach(r => {
+      // Only count current round? Or tournament?
+      // User liked "bogeys, pars, etc", usually round-based but tournament is also cool.
+      // Let's stick to current round for relevance.
+      if (Number(r.round_number) !== Number(round)) return
+      
+      const p = parMap.get(Number(r.hole_number))
+      if (!p) return
+      
+      const diff = r.strokes - p
+      if (diff <= -2) counts.eagle++
+      else if (diff === -1) counts.birdie++
+      else if (diff === 0) counts.par++
+      else if (diff === 1) counts.bogey++
+      else counts.double++
+    })
+    return counts
+  }, [player, round, parMap])
+  
+  const maxVal = Math.max(...Object.values(scoring), 1)
 
   if (!holes.length) {
     return (
@@ -152,26 +178,54 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
             </div>
           </div>
         </div>
-        <div className="px-6 py-4 grid grid-cols-4 gap-4">
-          <div>
-            <p className="text-xs text-gray-600">Thru</p>
-            <p className="text-2xl font-bold text-gray-900">{player.thru_hole || 0}</p>
-          </div>
-          <div>
-            <p className="text-xs text-gray-600">Score Today</p>
-            <p className="text-2xl font-bold text-gray-900">
-               {formatToPar(todayToPar)}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-gray-600">Total</p>
-            <p className="text-2xl font-bold text-gray-900">
-               {formatToPar(totalToPar)}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-gray-600">Group</p>
-            <p className="text-2xl font-bold text-gray-900">{group?.members?.length || 1}</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 divide-x divide-gray-100 border-b border-gray-100">
+           <div className="p-4 flex flex-col justify-center items-center">
+              <p className="text-xs text-gray-400 uppercase font-bold text-center">Score Today</p>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{formatToPar(todayToPar)}</div>
+           </div>
+           <div className="p-4 flex flex-col justify-center items-center">
+              <p className="text-xs text-gray-400 uppercase font-bold text-center">Thru</p>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{player.thru_hole || 0}</div>
+           </div>
+            
+           {/* Detailed Stats in Header */}
+           <div className="p-4 col-span-2">
+             <div className="h-full flex items-center justify-center w-full">
+               <div className="w-full">
+                 <StatsEmbed player={player} holes={holes} variant="large" />
+               </div>
+             </div>
+           </div>
+        </div>
+        
+        {/* Score Breakdown Bar */}
+        <div className="px-6 py-4 bg-gray-50 border-t border-gray-100">
+          <div className="flex items-end gap-1 h-16">
+            <div className="flex-1 flex flex-col items-center justify-end group">
+              <div className="text-xs font-bold text-yellow-600 mb-1">{scoring.eagle}</div>
+              <div style={{height: `${(scoring.eagle / maxVal) * 100}%`}} className="w-full bg-yellow-400 rounded-t-sm min-h-[4px] transition-all" />
+              <div className="text-[10px] text-gray-500 uppercase mt-1 font-bold">Eagle</div>
+            </div>
+            <div className="flex-1 flex flex-col items-center justify-end group">
+              <div className="text-xs font-bold text-red-600 mb-1">{scoring.birdie}</div>
+              <div style={{height: `${(scoring.birdie / maxVal) * 100}%`}} className="w-full bg-red-400 rounded-t-sm min-h-[4px] transition-all" />
+              <div className="text-[10px] text-gray-500 uppercase mt-1 font-bold">Birdie</div>
+            </div>
+            <div className="flex-1 flex flex-col items-center justify-end group">
+              <div className="text-xs font-bold text-gray-600 mb-1">{scoring.par}</div>
+              <div style={{height: `${(scoring.par / maxVal) * 100}%`}} className="w-full bg-gray-300 rounded-t-sm min-h-[4px] transition-all" />
+              <div className="text-[10px] text-gray-500 uppercase mt-1 font-bold">Par</div>
+            </div>
+            <div className="flex-1 flex flex-col items-center justify-end group">
+               <div className="text-xs font-bold text-blue-600 mb-1">{scoring.bogey}</div>
+               <div style={{height: `${(scoring.bogey / maxVal) * 100}%`}} className="w-full bg-blue-400 rounded-t-sm min-h-[4px] transition-all" />
+               <div className="text-[10px] text-gray-500 uppercase mt-1 font-bold">Bogey</div>
+            </div>
+            <div className="flex-1 flex flex-col items-center justify-end group">
+               <div className="text-xs font-bold text-gray-800 mb-1">{scoring.double}</div>
+               <div style={{height: `${(scoring.double / maxVal) * 100}%`}} className="w-full bg-gray-800 rounded-t-sm min-h-[4px] transition-all" />
+               <div className="text-[10px] text-gray-500 uppercase mt-1 font-bold">Dbl+</div>
+            </div>
           </div>
         </div>
       </div>
@@ -675,10 +729,11 @@ export default function TournamentPage() {
                 thruDisplay={thruDisplay}
                 formatToPar={formatToPar}
                 onPlayerClick={setSelectedPlayerId}
+                selectedPlayerId={selectedPlayerId}
+                course={course}
               />
             )}
           </div>
-
           {/* Sidebar */}
           <div className="space-y-4">
             {humanGroupNotStarted ? (
@@ -735,12 +790,19 @@ export default function TournamentPage() {
               />
             )}
 
+            {/* Event Feed */}
+            <EventFeed events={t.recent_events} />
+
+            {/* Low Rounds / Big Movers */}
+            <BigMoversWidget rounds={t.best_rounds} />
+
             {featuredGroup && (
               <OnCourseTracker
                 tournament={t}
                 featuredGroup={featuredGroup}
                 course={course}
                 onPlayerClick={setSelectedPlayerId}
+                selectedPlayerId={selectedPlayerId}
               />
             )}
 
@@ -780,6 +842,7 @@ export default function TournamentPage() {
 
 /** ---------- components ---------- */
 
+// Revert Leaderboard to allow navigation on click instead of expansion
 function Leaderboard({
   rows,
   totalCount,
@@ -790,6 +853,8 @@ function Leaderboard({
   thruDisplay,
   formatToPar,
   onPlayerClick,
+  selectedPlayerId,
+  course
 }) {
   const getScoreColor = (score) => {
     const v = Number(score || 0)
@@ -1242,7 +1307,294 @@ function GroupScorecard({ group, holes, round, currentHole }) {
   )
 }
 
-function OnCourseTracker({ tournament, featuredGroup, course, onPlayerClick }) {
+
+function PlayerStatsModal({ player, holes, onClose }) {
+  if (!player) return null
+
+  // Calculate detailed stats from hole results
+  // We need to filter by rounds? Or just show "Tournament Stats"? Using all results for now.
+  
+  const results = player.hole_results || []
+  if (results.length === 0) return null
+  
+  // Aggregates
+  let totalHoles = 0
+  let fairwaysHit = 0
+  let fairwaysPossible = 0
+  let girHit = 0
+  let puttsTotal = 0
+  let distanceTotal = 0
+  let driveCount = 0
+  let eagles = 0
+  let birdies = 0
+  let pars = 0
+  let bogeys = 0
+  let doubles2 = 0
+  
+  results.forEach(r => {
+     totalHoles++
+     const stats = r.stats || {}
+     const hole = holes.find(h => h.number === r.hole_number)
+     const par = hole ? hole.par : 4
+
+     // Scoring
+     const diff = r.strokes - par
+     if (diff <= -2) eagles++
+     else if (diff === -1) birdies++
+     else if (diff === 0) pars++
+     else if (diff === 1) bogeys++
+     else doubles2++
+
+     // FIR
+     if (stats.fir !== undefined && stats.fir !== null) {
+       fairwaysPossible++
+       if (stats.fir) fairwaysHit++
+     }
+     
+     // GIR
+     if (stats.gir) girHit++
+     
+     // Putts
+     if (stats.putts !== undefined) puttsTotal += stats.putts
+     
+     // Drive Distance
+     if (stats.drive_distance) {
+       distanceTotal += stats.drive_distance
+       driveCount++
+     }
+  })
+
+  const firPct = fairwaysPossible > 0 ? Math.round((fairwaysHit / fairwaysPossible) * 100) : 0
+  const girPct = totalHoles > 0 ? Math.round((girHit / totalHoles) * 100) : 0
+  const avgPutts = totalHoles > 0 ? (puttsTotal / totalHoles).toFixed(1) : 0
+  const avgDrive = driveCount > 0 ? Math.round(distanceTotal / driveCount) : 0
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="p-4 bg-gray-900 text-white flex justify-between items-center">
+          <div>
+            <h2 className="text-xl font-bold">{player.display_name}</h2>
+            <p className="text-gray-400 text-xs uppercase tracking-wider">{player.is_human ? 'Human' : 'Bot'} • Tournament Stats</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full">✕</button>
+        </div>
+        
+        <div className="p-6 grid grid-cols-2 gap-6">
+           {/* Primary Stats */}
+           <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
+             <p className="text-gray-500 text-xs font-bold uppercase mb-1">Driving Dist</p>
+             <p className="text-3xl font-black text-gray-800">{avgDrive}<span className="text-base font-normal text-gray-400 ml-1">yds</span></p>
+           </div>
+           
+           <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
+             <p className="text-gray-500 text-xs font-bold uppercase mb-1">Putts / Hole</p>
+             <p className="text-3xl font-black text-gray-800">{avgPutts}</p>
+           </div>
+           
+           <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
+             <p className="text-gray-500 text-xs font-bold uppercase mb-1">Fairways Hit</p>
+             <div className="flex items-end justify-center gap-2">
+                <p className="text-3xl font-black text-gray-800">{firPct}%</p>
+                <p className="text-xs text-gray-400 mb-1">({fairwaysHit}/{fairwaysPossible})</p>
+             </div>
+           </div>
+           
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 text-center">
+             <p className="text-gray-500 text-xs font-bold uppercase mb-1">Greens in Reg</p>
+             <div className="flex items-end justify-center gap-2">
+                <p className="text-3xl font-black text-gray-800">{girPct}%</p>
+                <p className="text-xs text-gray-400 mb-1">({girHit}/{totalHoles})</p>
+             </div>
+           </div>
+        </div>
+        
+        {/* Scoring Breakdown */}
+        <div className="px-6 pb-6">
+           <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 text-center">Score Distribution</h4>
+           <div className="flex items-center gap-1 h-3 rounded-full overflow-hidden w-full bg-gray-100">
+              {eagles > 0 && <div style={{width: `${(eagles/totalHoles)*100}%`}} className="h-full bg-yellow-400" title={`Eagles: ${eagles}`} />}
+              {birdies > 0 && <div style={{width: `${(birdies/totalHoles)*100}%`}} className="h-full bg-red-500" title={`Birdies: ${birdies}`} />}
+              {pars > 0 && <div style={{width: `${(pars/totalHoles)*100}%`}} className="h-full bg-gray-300" title={`Pars: ${pars}`} />}
+              {bogeys > 0 && <div style={{width: `${(bogeys/totalHoles)*100}%`}} className="h-full bg-blue-400" title={`Bogeys: ${bogeys}`} />}
+              {doubles2 > 0 && <div style={{width: `${(doubles2/totalHoles)*100}%`}} className="h-full bg-black" title={`Double+: ${doubles2}`} />}
+           </div>
+           <div className="flex justify-between text-[10px] text-gray-500 mt-2 font-medium">
+              <span>Eagl/Bird: {eagles+birdies}</span>
+              <span>Par: {pars}</span>
+              <span>Bogey+: {bogeys+doubles2}</span>
+           </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+function EventFeed({ events }) {
+  const [displayedEvents, setDisplayedEvents] = useState([])
+  const prevEventsRef = useRef([])
+
+  useEffect(() => {
+    if (JSON.stringify(events) !== JSON.stringify(prevEventsRef.current)) {
+      setDisplayedEvents(events)
+      prevEventsRef.current = events
+    }
+  }, [events])
+
+  if (!displayedEvents || displayedEvents.length === 0) return null
+
+  return (
+    <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
+      <div className="bg-gradient-to-r from-purple-50 to-purple-100 px-4 py-3 border-b border-purple-200 flex justify-between items-center">
+        <h3 className="font-bold text-purple-900">Event Feed</h3>
+        <span className="text-xs bg-purple-200 text-purple-800 px-2 py-0.5 rounded-full font-bold">Live</span>
+      </div>
+      <div className="divide-y divide-purple-50 max-h-60 overflow-y-auto">
+        {displayedEvents.map((ev) => (
+          <div key={ev.id} className="p-3 hover:bg-purple-50 transition-colors">
+            <div className="flex justify-between items-start">
+               <p className="text-sm text-gray-800 leading-tight">
+                {ev.text}
+              </p>
+              <span className="text-[10px] text-gray-400 whitespace-nowrap ml-2">
+                {new Date(ev.created_at).toLocaleTimeString([], { hour: '2-digit', minute:'2-digit' })}
+              </span>
+            </div>
+            
+             {/* Badge for imp=3 (Eagle/HIO) */}
+             {ev.importance >= 3 && (
+                <span className="inline-block mt-1 text-[10px] bg-yellow-100 text-yellow-800 px-1.5 py-0.5 rounded font-bold border border-yellow-200">
+                  HIGHLIGHT
+                </span>
+             )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+
+function BigMoversWidget({ rounds }) {
+  if (!rounds || rounds.length === 0) return null
+
+  return (
+    <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
+      <div className="bg-gradient-to-r from-blue-50 to-blue-100 px-4 py-3 border-b border-blue-200">
+        <h3 className="font-bold text-blue-900">Low Rounds</h3>
+        <p className="text-xs text-blue-700">Best scores today</p>
+      </div>
+      <div className="divide-y divide-gray-100">
+        {rounds.map((r, i) => (
+          <div key={r.id} className="p-3 flex items-center justify-between hover:bg-gray-50">
+           <div className="flex items-center gap-3">
+              <span className={`text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full ${
+                  i === 0 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-500'
+              }`}>
+                {i + 1}
+              </span>
+              <div>
+                <p className="text-sm font-bold text-gray-800">{r.name}</p>
+                <p className="text-xs text-gray-500">Thru {r.thru}</p>
+              </div>
+           </div>
+           <div className="text-right">
+              <span className={`font-mono font-bold ${
+                  r.score < 0 ? 'text-red-600' : r.score > 0 ? 'text-gray-900' : 'text-green-600'
+              }`}>
+                  {r.score === 0 ? 'E' : r.score > 0 ? `+${r.score}` : r.score}
+              </span>
+           </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function StatsEmbed({ player, holes, variant = 'small' }) {
+  if (!player) return null
+  
+  // Calculate minimal stats for sidebar
+  const results = player.hole_results || []
+  let totalHoles = 0
+  let fairwaysHit = 0
+  let fairwaysPossible = 0
+  let girHit = 0
+  let puttsTotal = 0
+  let distanceTotal = 0
+  let driveCount = 0
+
+  results.forEach(r => {
+     totalHoles++
+     const stats = r.stats || {}
+     const holesPlayed = r.hole_number
+
+     // FIR
+     if (stats.fir !== undefined && stats.fir !== null) {
+       fairwaysPossible++
+       if (stats.fir) fairwaysHit++
+     }
+     if (stats.gir) girHit++
+     if (stats.putts !== undefined) puttsTotal += stats.putts
+     if (stats.drive_distance) {
+       distanceTotal += stats.drive_distance
+       driveCount++
+     }
+  })
+
+  const firPct = fairwaysPossible > 0 ? Math.round((fairwaysHit / fairwaysPossible) * 100) : '-'
+  const girPct = totalHoles > 0 ? Math.round((girHit / totalHoles) * 100) : '-'
+  const avgPutts = totalHoles > 0 ? (puttsTotal / totalHoles).toFixed(1) : '-'
+  const avgDrive = driveCount > 0 ? Math.round(distanceTotal / driveCount) : '-'
+
+  if (variant === 'large') {
+    return (
+      <div className="bg-white rounded-lg border border-gray-100 p-3 grid grid-cols-4 gap-4 h-full items-center">
+         <div className="text-center">
+           <span className="text-green-600 uppercase font-bold text-[10px] block mb-1">Driving Dist</span>
+           <span className="font-mono text-xl font-bold text-gray-800">{avgDrive}<span className="text-xs text-gray-400 ml-0.5">y</span></span>
+         </div>
+         <div className="text-center border-l border-gray-100">
+           <span className="text-green-600 uppercase font-bold text-[10px] block mb-1">Fairways</span>
+           <span className="font-mono text-xl font-bold text-gray-800">{firPct}<span className="text-xs text-gray-400 ml-0.5">%</span></span>
+         </div>
+         <div className="text-center border-l border-gray-100">
+           <span className="text-green-600 uppercase font-bold text-[10px] block mb-1">GIR</span>
+           <span className="font-mono text-xl font-bold text-gray-800">{girPct}<span className="text-xs text-gray-400 ml-0.5">%</span></span>
+         </div>
+         <div className="text-center border-l border-gray-100">
+           <span className="text-green-600 uppercase font-bold text-[10px] block mb-1">Putts/Hole</span>
+           <span className="font-mono text-xl font-bold text-gray-800">{avgPutts}</span>
+         </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-2 bg-gray-50 border border-t-0 border-gray-100 p-2 rounded-b-lg text-[10px] grid grid-cols-2 gap-2">
+       <div>
+         <span className="text-gray-400 uppercase font-bold text-[8px] block">Driving</span>
+         <span className="font-mono font-bold text-gray-700">{avgDrive}y</span>
+       </div>
+       <div>
+         <span className="text-gray-400 uppercase font-bold text-[8px] block">Putts/Hole</span>
+         <span className="font-mono font-bold text-gray-700">{avgPutts}</span>
+       </div>
+       <div>
+         <span className="text-gray-400 uppercase font-bold text-[8px] block">Fairways</span>
+         <span className="font-mono font-bold text-gray-700">{firPct}%</span>
+       </div>
+       <div>
+         <span className="text-gray-400 uppercase font-bold text-[8px] block">GIR</span>
+         <span className="font-mono font-bold text-gray-700">{girPct}%</span>
+       </div>
+    </div>
+  )
+}
+
+function OnCourseTracker({ tournament, featuredGroup, course, onPlayerClick, selectedPlayerId }) {
   const parMap = useMemo(() => course ? buildParMap(course) : new Map(), [course])
 
   const getScore = (entry) => {
@@ -1277,35 +1629,51 @@ function OnCourseTracker({ tournament, featuredGroup, course, onPlayerClick }) {
           .map((g) => (
             <div
               key={g.id}
-              className="p-3 bg-gray-50 rounded-lg border border-gray-100"
+              className="bg-white rounded-lg border border-gray-100 shadow-sm overflow-hidden"
             >
-              <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-100">
-                <span className="text-xs text-gray-700 font-bold bg-white px-2 py-1 rounded shadow-sm">
+              <div className="px-3 py-2 bg-gray-50/50 flex items-center justify-between border-b border-gray-100">
+                <span className="text-xs text-gray-600 font-medium font-mono">
                   {fmtTime(g.tee_time)}
                 </span>
-                <span className="text-xs font-bold text-green-700 bg-green-50 px-2 py-1 rounded">
+                <span className="text-[10px] font-bold text-green-700 bg-green-50 px-1.5 py-0.5 rounded uppercase tracking-wide">
                   {groupStatus(g)}
                 </span>
               </div>
-              <div className="grid grid-cols-1 gap-1">
-                {g.members?.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => onPlayerClick && onPlayerClick(m.entry?.id)}
-                    className="text-left text-xs text-gray-700 hover:text-green-700 hover:bg-white p-1 rounded transition-colors flex items-center gap-2 truncate w-full"
-                  >
-                   <div className="flex items-center gap-2 truncate">
-                      <div 
-                        className="w-1.5 h-1.5 rounded-full flex-shrink-0" 
-                        style={{ backgroundColor: m.entry?.avatar_color || '#94a3b8' }}
-                      />
-                      <span className="truncate text-gray-700 hover:text-green-700">{m.entry?.display_name}</span>
-                   </div>
-                   <span className={`text-xs ${getScoreColor(m.entry)}`}>
-                      {getScore(m.entry)}
-                   </span>
-                  </button>
-                ))}
+              <div className="divide-y divide-gray-50">
+                {g.members?.map((m) => {
+                  const isSelected = selectedPlayerId === m.entry?.id
+                  return (
+                    <div key={m.id} className="transition-colors">
+                      <button
+                        onClick={() => onPlayerClick && onPlayerClick(isSelected ? null : m.entry?.id)}
+                        className={`w-full text-left p-2 flex items-center justify-between hover:bg-gray-50 focus:outline-none ${isSelected ? 'bg-green-50/30' : ''}`}
+                      >
+                         <div className="flex items-center gap-2 overflow-hidden">
+                            <div 
+                              className="w-2 h-2 rounded-full flex-shrink-0" 
+                              style={{ backgroundColor: m.entry?.avatar_color || '#94a3b8' }}
+                            />
+                            <span className={`text-xs truncate max-w-[110px] ${isSelected ? 'font-bold text-green-900' : 'text-gray-700'}`}>
+                              {m.entry?.display_name}
+                            </span>
+                         </div>
+                         <div className="flex items-center gap-2 flex-shrink-0">
+                            <span className="text-[10px] text-gray-400 font-mono">
+                               {m.entry?.hole_results?.length || 0}
+                            </span>
+                             <span className={`text-xs w-8 text-right ${getScoreColor(m.entry)}`}>
+                                {getScore(m.entry)}
+                             </span>
+                         </div>
+                      </button>
+                      
+                      {isSelected && (
+                         <div className="px-2 pb-2">
+                            <StatsEmbed player={m.entry} holes={course?.holes || []} />
+                         </div>
+                      )}
+                    </div>
+                )})}
               </div>
             </div>
           ))}

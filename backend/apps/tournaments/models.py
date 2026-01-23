@@ -14,20 +14,33 @@ class Tournament(models.Model):
         ("setup", "Setup"),
         ("in_progress", "In Progress"),
         ("finished", "Finished"),
+        ("playoff", "Playoff"),
+    ]
+
+    FORMAT_CHOICES = [
+        ("stroke", "Stroke Play"),
+        ("match", "Match Play (Ryder Cup)"),
     ]
 
     name = models.CharField(max_length=200)
     course = models.ForeignKey(Course, on_delete=models.PROTECT)
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="setup")
+    format = models.CharField(max_length=20, choices=FORMAT_CHOICES, default="stroke")
 
     # Tournament clock (this is key)
     start_time = models.DateTimeField()
     current_time = models.DateTimeField()
     cut_applied = models.BooleanField(default=False)
     cut_size = models.PositiveSmallIntegerField(default=65)
+    
+    projected_cut_score = models.IntegerField(null=True, blank=True)
 
     current_round = models.PositiveSmallIntegerField(default=1)  # 1–4
+    
+    # Store past round results for Ryder Cup match history
+    session_history = models.JSONField(blank=True, default=dict)
+    
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -50,6 +63,7 @@ class TournamentEntry(models.Model):
 
     display_name = models.CharField(max_length=200)
     is_human = models.BooleanField(default=False)
+    team = models.CharField(max_length=10, blank=True, default="", help_text="USA or EUR for Match Play")
 
     # Current tournament totals
     total_strokes = models.IntegerField(default=0)
@@ -97,8 +111,26 @@ class HoleResult(models.Model):
     hole_number = models.PositiveSmallIntegerField()
 
     strokes = models.PositiveSmallIntegerField()
+    stats = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         unique_together = [("entry", "round_number", "hole_number")]
         ordering = ["round_number", "hole_number"]
+
+
+class TournamentEvent(models.Model):
+    tournament = models.ForeignKey(Tournament, on_delete=models.CASCADE, related_name="events")
+    round_number = models.PositiveSmallIntegerField()
+    text = models.CharField(max_length=255)
+    
+    # 1=generic, 2=birdie/bogey, 3=eagle/double, 4=lead change/ace
+    importance = models.SmallIntegerField(default=1)  
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.text

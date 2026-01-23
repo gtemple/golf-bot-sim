@@ -137,10 +137,46 @@ class Command(BaseCommand):
                     return row[n]
             return None
 
+        def get_iso_country(c_name: str) -> str:
+            m = {
+                "United States": "USA",
+                "Canada": "CAN",
+                "England": "ENG",
+                "Scotland": "SCO",
+                "Ireland": "IRL",
+                "Northern Ireland": "NIR",
+                "Wales": "WAL",
+                "Australia": "AUS",
+                "New Zealand": "NZL",
+                "South Africa": "RSA",
+                "Japan": "JPN",
+                "South Korea": "KOR",
+                "Korea": "KOR",
+                "China": "CHN",
+                "Sweden": "SWE",
+                "Norway": "NOR",
+                "Denmark": "DEN",
+                "Finland": "FIN",
+                "Spain": "ESP",
+                "Italy": "ITA",
+                "France": "FRA",
+                "Germany": "GER",
+                "Austria": "AUT",
+                "Belgium": "BEL",
+                "Netherlands": "NED",
+                "Mexico": "MEX",
+                "Chile": "CHI",
+                "Argentina": "ARG",
+                "Colombia": "COL",
+            }
+            return m.get(c_name, c_name[:3].upper())
+
         for row in rows[:TOP_N]:
             name = row.get("NAME")
             rank_raw = row.get("RANKING")
-            country = row.get("CTRY") or ""
+            country_raw = row.get("CTRY") or ""
+            
+            country_code = get_iso_country(country_raw)
 
             if not name or not rank_raw:
                 continue
@@ -155,7 +191,7 @@ class Command(BaseCommand):
             obj, was_created = Golfer.objects.update_or_create(
               name=name,
               defaults={
-                  "country": country[:3],
+                  "country": country_code,
                   "is_active": True,
                   **ratings,
               },
