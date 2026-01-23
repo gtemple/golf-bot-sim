@@ -71,7 +71,7 @@ class Golfer(models.Model):
             "discipline",
             "sand",
             "clutch",
-            "risk_tolerance",
+            # "risk_tolerance",  <-- Removed from overall
             "weather_handling",
             "endurance",
         ]

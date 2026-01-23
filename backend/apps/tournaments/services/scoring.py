@@ -85,6 +85,124 @@ def _get_round_state(entry, round_number: int):
     return state, rkey, state[rkey]
 
 
+def _generate_commentary(par, strokes, stats, golfer_name):
+    """
+    Generates a play-by-play string based on the hole stats.
+    Returns: (text, excitement_level)
+    excitement_level: 0-10 integer
+    """
+    fir = stats.get("fir")
+    gir = stats.get("gir")
+    putts = stats.get("putts")
+    dist = stats.get("drive_distance")
+    
+    score_diff = strokes - par
+    excitement = 0
+    
+    # 1. Tee Shot
+    tee_text = ""
+    if par == 3:
+        if gir:
+            # Hole in one?
+            if strokes == 1:
+                tee_text = "HOLE IN ONE!!"
+                excitement = 10
+            elif strokes == 2: # Birdie
+                tee_text = random.choice([
+                    f"Sticks the tee shot close.",
+                    f"Darts it in there tight.",
+                ])
+                excitement += 2
+            else:
+                tee_text = random.choice([
+                    f"Sticks the tee shot on the green.",
+                    f"Irons it right at the pin.",
+                    f"Safe shot to the center of the green.",
+                ])
+        else:
+            tee_text = random.choice([
+                f"Misses the green from the tee.",
+                f"Pulls it slightly into the rough.",
+                f"Comes up short of the green.",
+            ])
+    else:
+        # Par 4/5
+        if fir is True:
+            if dist > 320:
+                tee_text = f"Monstrous drive {dist} yards down the middle."
+                excitement += 1
+            else:
+                tee_text = random.choice([
+                    f"Smoked a drive {dist} yards down the middle.",
+                    f"Finds the short grass off the tee.",
+                    f"Perfect position in the fairway.",
+                    f"Launch codes enabled: {dist}y drive.",
+                ])
+        elif fir is False:
+            tee_text = random.choice([
+                f"Wayward drive into the rough.",
+                f"Misses the fairway to the right.",
+                f"Hooks it into trouble.",
+                f"Drive finds the thick stuff.",
+            ])
+            
+    # 2. Approach / Mid-hole
+    app_text = ""
+    if par > 3:
+        if gir:
+            if strokes <= par - 2: # Eagle/Albatross
+                 app_text = "Incredible approach sets up a tap-in."
+                 excitement += 4
+            elif strokes == par - 1: # Birdie
+                 app_text = random.choice([
+                    "Knocks the approach stiff.",
+                    "Great iron shot gives a birdie look.",
+                 ])
+                 excitement += 2
+            else:
+                 app_text = "Safely on in regulation."
+        elif not gir and score_diff <= 0:
+            # Missed green but saved par/birdie -> Scramble
+            app_text = random.choice([
+                "Missed the green but hit a great chip.",
+                "Splash out from the bunker to close range.",
+                "Brilliant recovery shot.",
+            ])
+            excitement += 2 # Scrambling is cool
+        else:
+            app_text = random.choice([
+                "Approach misses the mark.",
+                "Can't hold the green.",
+                "Left in a tricky spot.",
+            ])
+            
+    # 3. Putting / Result
+    putt_text = ""
+    if score_diff <= -2:
+        putt_text = "Drains the eagle putt! Incredible!"
+        excitement = 10
+    elif score_diff == -1:
+        putt_text = random.choice([
+            "Rolls in the birdie putt!",
+            "Dead center for birdie!",
+            "Takes advantage with a red number.",
+        ])
+        excitement += 3 # Birdies are always good
+    elif score_diff == 0:
+        if putts == 1:
+            putt_text = "Clutch par save with one putt."
+            excitement += 1
+        else:
+            putt_text = "Two putts for a solid par."
+    elif score_diff == 1:
+        putt_text = "Lip out for par, taps in for bogey."
+        if excitement > 0: excitement -= 1 # Keep it somewhat exciting if they drove well
+    else:
+        putt_text = "Rough finish to the hole."
+
+    return (f"{tee_text} {app_text} {putt_text}", excitement)
+
+
 # ---------- core sim ----------
 
 def simulate_strokes_for_entry_with_stats(entry, hole: Hole, round_number: int) -> tuple[int, dict]:
@@ -158,6 +276,31 @@ def simulate_strokes_for_entry_with_stats(entry, hole: Hole, round_number: int) 
     speed_factor = max(0, greens_speed - 10.0)
     putting_penalty += (speed_factor * 0.08) * (1.0 - putting)
 
+    # 5. Weather Conditions (New)
+    weather_penalty = 0.0
+    tournament = entry.tournament
+    # Need to access 'round_conditions' safely
+    conds = getattr(tournament, "round_conditions", {}) or {}
+    r_cond = conds.get(str(round_number)) or {}
+    
+    wind_mph = float(r_cond.get("wind_mph", 0))
+    rain = r_cond.get("rain", "None")
+    
+    # Wind penalty
+    if wind_mph > 5:
+        # Wind affects ball striking and putting
+        # 0.01 stroke per mph above 5?
+        wind_factor = (wind_mph - 5.0) * 0.015 
+        # Good weather handlers mitigate this
+        weather_skill = float(n(golfer.weather_handling)) if golfer else 0.5
+        weather_penalty += wind_factor * (1.5 - weather_skill) # 1.5 multiplier makes it harder for everyone
+
+    # Rain penalty
+    if rain == "Light":
+        weather_penalty += 0.20 * (1.0 - (float(n(golfer.weather_handling)) if golfer else 0.5))
+    elif rain == "Heavy":
+        weather_penalty += 0.50 * (1.0 - (float(n(golfer.weather_handling)) if golfer else 0.5))
+
     # Skill advantage (turn “good at golf” into fewer strokes)
     # Par weighting: on par 5s driving/ball striking matters more; par 3s approach matters more.
     par = int(hole.par)
@@ -188,6 +331,25 @@ def simulate_strokes_for_entry_with_stats(entry, hole: Hole, round_number: int) 
     risk_mean = -(risk - 0.5) * 0.06  # -0.03..+0.03
     # Clutch: helps on “save” situations; model it as a tiny counter to difficulty
     clutch_help = -(clutch - 0.5) * (0.04 + 0.04 * messy)
+    
+    # "Sunday Pressure" Mechanic
+    # If Round 4 and Back 9 and In Contention
+    pressure_penalty = 0.0
+    if round_number == 4 and hole.number >= 10:
+        # Check position. If human, never pressure? Or yes? Yes for realism.
+        pos = getattr(entry, "position", 999) or 999
+        if pos <= 5: # Top 5
+             # Pressure is ON.
+             # Players with Low Clutch (<0.7) get penalized.
+             # Players with High Clutch (>0.85) get a boost.
+             
+             # Closer to lead = more intensity
+             intensity = 1.0 if pos <= 3 else 0.5
+             
+             # Calculate penalty
+             # Clutch 0.5 -> (0.75 - 0.5) = 0.25 (Positive = Worse score)
+             # Clutch 0.9 -> (0.75 - 0.9) = -0.15 (Negative = Better score)
+             pressure_penalty = (0.75 - clutch) * 0.6 * intensity
 
     expected = (
         par
@@ -198,17 +360,23 @@ def simulate_strokes_for_entry_with_stats(entry, hole: Hole, round_number: int) 
         + hazard_penalty
         + bunker_penalty
         + putting_penalty
+        + weather_penalty
         + skill_strokes
         + form
         + momentum
         + risk_mean
         + clutch_help
+        + pressure_penalty
     )
 
     # Variance: higher volatility + lower consistency = wider spread
     base_sigma = 0.38 + (1.0 - consistency) * 0.35  # ~0.38..0.73
     sigma = base_sigma * _clamp(vol, 0.6, 2.0)
     sigma += risk * 0.06  # risk adds a bit of chaos
+    
+    # High pressure adds variance for everyone except the ice-cold clutchness
+    if pressure_penalty > 0.05:
+        sigma += 0.20
 
     strokes = int(round(random.gauss(expected, sigma)))
 
@@ -342,62 +510,28 @@ def simulate_strokes_for_entry_with_stats(entry, hole: Hole, round_number: int) 
         # Score 4 (Par) -> 2 putt
         # Score 5 (Bogey) -> 3 putt
         putts = strokes - (par - 2)
+        if putts < 0: putts = 0 # Hole out from fairway
     else:
-        # Missed green. On in (Par - 1) or more.
-        # Par 4. On in 3.
-        # Score 4 (Par) -> 1 putt (Save!)
-        # Score 5 (Bogey) -> 2 putt
-        # Score 6 (Dbl) -> 3 putt? Or on in 4, 2 putt?
+        # Missed GIR. 
+        # Score 3 (Par 4, Birdie) -> Chip in (0 putt)
+        # Score 4 (Par 4, Par) -> Chip + 1 putt
+        # Score 5 (Par 4, Bogey) -> Chip + 2 putt
+        # Score 6 -> Chip + 3 putt OR Chip-chip + 2 putt
+        # Let's assume competent pros usually chip on in 1 shot from around green
+        shots_around_green = 1 # The chip
+        shots_to_reach_around = par - 2 # Drive + Approach(miss)
         
-        # We'll bias towards standard putting (1-2 putts usually)
-        # If score says we have room for 2 putts, take 2.
-        # If score is low, take 1.
+        # Total shots excluding putts = (Par-2) + 1 = Par - 1
+        putts = strokes - (par - 1)
+        if putts < 0: putts = 0 
         
-        scramble_shots = strokes - (par - 2)
-        # if score is par (4), scramble_shots = 2. Means Chip + Putt = 2. -> 1 putt.
-        # if score is bogey (5), scramble_shots = 3. Chip + 2 Putt? or Chip + Chip + 1 Putt?
-        
-        # Let's pivot: Determine putts based on putting skill, then rest is "shots to green"
-        # 1-putt prob: 30% + (putting * 20%)
-        # 3-putt prob: 10% - (putting * 8%)
-        
-        # But we must respect the TOTAL score.
-        # Max putts = strokes - 1 (must have at least 1 shot to get there, unless hole in one)
-        max_putts = max(0, strokes - 1)
-        
-        # Typical breakdown
-        if strokes <= par: 
-            # likely 1 putt if !GIR (Scramble)
-            putts = 1
-        else:
-            # likely 2 putts
-            putts = 2
-            
-    # Clamp putts
-    putts = max(0, min(putts, strokes - 1))
-    
-    # Specific overrides for logic consistency
-    if strokes == par - 1: # Birdie
-        # If GIR (on in par-2), then 1 putt.
-        # If !GIR (on in par-3?? Chip in!), then 0 putts.
-        if not stats["gir"]:
-            if random.random() < 0.2: putts = 0 # Chip in
-            else: putts = 1 # Close 
-    
     stats["putts"] = putts
-    
-    # Proximity (ft)
-    if stats["gir"]:
-        # Good approach?
-        base_prox = 35 - (approach * 15) - (ball_striking * 5)
-        if putts == 0: base_prox = 0
-        elif putts == 1: base_prox = random.uniform(3, 12)
-        elif putts >= 3: base_prox = random.uniform(40, 70)
-        else: base_prox = random.uniform(15, 40)
-        stats["prox_to_hole"] = int(base_prox)
-    else:
-        # Missed green stats? distance from pin after approach?
-        stats["prox_to_hole"] = int(random.uniform(25, 60)) # fringe/rough
+
+    # Add play-by-play commentary
+    # Now returns tuple (text, excitement)
+    comm_text, excitement = _generate_commentary(par, strokes, stats, entry.display_name)
+    stats["commentary"] = comm_text
+    stats["excitement"] = excitement
 
     return strokes, stats
 

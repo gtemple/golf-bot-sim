@@ -40,6 +40,12 @@ class Tournament(models.Model):
     
     # Store past round results for Ryder Cup match history
     session_history = models.JSONField(blank=True, default=dict)
+
+    # Weather per round: {"1": {"wind_mph": 10, "rain": "none"}, ...}
+    round_conditions = models.JSONField(blank=True, default=dict)
+
+    # Live Win Probabilities: {"entry_id": 0.15, ...}
+    live_win_probs = models.JSONField(blank=True, default=dict)
     
     created_at = models.DateTimeField(auto_now_add=True)
 

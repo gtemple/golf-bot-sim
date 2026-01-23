@@ -13,6 +13,7 @@ from apps.tournaments.serializers import TournamentSerializer, TournamentCreateS
 from apps.tournaments.services.pace import minutes_for_hole
 from apps.tournaments.services.routing import next_hole
 from apps.tournaments.services.scoring import simulate_strokes_for_entry, simulate_strokes_for_entry_with_stats
+from apps.tournaments.services.probability import calculate_win_probabilities
 
 
 class TournamentViewSet(viewsets.ModelViewSet):
@@ -39,6 +40,30 @@ class TournamentViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         tournament = serializer.save()
+
+        # Generate weather forecast for 4 rounds + playoff
+        import random
+        conditions = {}
+        for r in range(1, 6):
+            # Simple weather model
+            # Wind: 0-30 mph
+            # Rain: None, Light, Heavy
+            # Firmness change?
+            
+            wind = random.randint(0, 25)
+            # 10% chance of rain
+            rain = "None"
+            if random.random() < 0.15:
+                rain = "Light" if random.random() < 0.7 else "Heavy"
+            
+            conditions[str(r)] = {
+                "wind_mph": wind,
+                "rain": rain
+            }
+        
+        tournament.round_conditions = conditions
+        tournament.save(update_fields=["round_conditions"])
+
         return Response(TournamentSerializer(tournament).data, status=status.HTTP_201_CREATED)
 
     def _archive_match_results(self, tournament):
@@ -659,6 +684,11 @@ class TournamentViewSet(viewsets.ModelViewSet):
         # update positions
         self._recompute_positions(tournament)
 
+        # Update Win Probabilities
+        probs = calculate_win_probabilities(tournament)
+        tournament.live_win_probs = probs
+        tournament.save(update_fields=["live_win_probs"])
+
         # re-fetch with prefetch
         tournament = self.get_queryset().get(pk=tournament.pk)
         return Response(TournamentSerializer(tournament).data)
@@ -736,24 +766,55 @@ class TournamentViewSet(viewsets.ModelViewSet):
                         # Log significant events
                         diff = strokes - hole.par
                         
+                        # Use raw excitement score from sim if available
+                        excitement = stats.get("excitement", 0)
+                        
+                        # Adjust importance based on golfer rank/position?
+                        # For now, just use excitement score + score diff logic
+                        
+                        term = ""
                         if diff <= -1:
                             term = "Birdie" if diff == -1 else "Eagle" if diff == -2 else "Albatross"
-                            text = f"{entry.display_name} made {term} on #{hole_num}."
-                            imp = 2 if diff == -1 else 3
+                        elif diff == 0:
+                            term = "Par"
+                        elif diff == 1:
+                            term = "Bogey"
+                        else:
+                            term = "Double Bogey+"
+                            
+                        # If excitement is high (>5), always log
+                        # If diff is eagle+, always log
+                        # If diff is birdie, log if excitement > 2 or top 10 player?
+                        
+                        should_log = False
+                        importance = 1
+                        
+                        if diff <= -2: # Eagle/Albatross
+                            should_log = True
+                            importance = 3
+                        elif diff == -1: # Birdie
+                             should_log = True
+                             importance = 2
+                        elif excitement >= 4: # Great par save or chip?
+                             should_log = True
+                             # text from commentary might be better
+                             importance = 2
+                        elif diff >= 2: # Double or worse
+                             should_log = True
+                             importance = 1
+                             
+                        if should_log:
+                            # Use commentary text if excitement is high, else standard
+                            if excitement >= 3 and stats.get("commentary"):
+                                display_text = f"{entry.display_name}: {stats['commentary']}"
+                            else:
+                                display_text = f"{entry.display_name} made {term} on #{hole_num}."
+                                
                             TournamentEvent.objects.create(
                                 tournament=tournament,
                                 round_number=tournament.current_round,
-                                text=text,
-                                importance=imp
-                            )
-                        elif diff >= 2:
-                            term = "Double Bogey" if diff == 2 else "Triple Bogey"
-                            text = f"{entry.display_name} made {term} on #{hole_num}."
-                            TournamentEvent.objects.create(
-                                tournament=tournament,
-                                round_number=tournament.current_round,
-                                text=text,
-                                importance=1
+                                text=display_text,
+                                importance=importance
                             )
 
                 # recompute totals for entries in this group
@@ -801,6 +862,11 @@ class TournamentViewSet(viewsets.ModelViewSet):
         # update projected cut
         if tournament.current_round <= 2:
              self._update_projected_cut(tournament)
+
+        # Update Win Probabilities live
+        probs = calculate_win_probabilities(tournament)
+        tournament.live_win_probs = probs
+        tournament.save(update_fields=["live_win_probs"])
 
         # rollover + cut
         all_finished = tournament.groups.filter(is_finished=False).count() == 0
@@ -854,6 +920,11 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
                 # After reseed, positions were nulled; recompute based on cumulative strokes
                 self._recompute_positions(tournament)
+                
+                # Update Win Probabilities at end of round
+                probs = calculate_win_probabilities(tournament)
+                tournament.live_win_probs = probs
+                tournament.save(update_fields=["live_win_probs"])
 
             else:
                 # End of Regulation (Round 4 or Match Play end)
@@ -968,6 +1039,11 @@ class TournamentViewSet(viewsets.ModelViewSet):
         self._update_entry_totals(entry, round_number)
 
         self._recompute_positions(tournament)
+
+        # Update Win Probabilities live
+        probs = calculate_win_probabilities(tournament)
+        tournament.live_win_probs = probs
+        tournament.save(update_fields=["live_win_probs"])
 
         tournament = self.get_queryset().get(pk=tournament.pk)
         return Response(TournamentSerializer(tournament).data)

@@ -101,6 +101,8 @@ class TournamentSerializer(serializers.ModelSerializer):
             "recent_events",
             "best_rounds",
             "session_history",
+            "round_conditions",
+            "live_win_probs",
             "entries",
             "groups",
         ]
