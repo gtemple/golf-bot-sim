@@ -17,116 +17,57 @@ def calculate_win_probabilities(tournament: Tournament) -> Dict[str, float]:
         entries = entries.filter(cut=False)
     
     # Pre-fetch needed data to avoid N+1 queries during loop setup
-    # Actually we just need current score and 'skill' proxy.
-    
-    # We need "Score to Par". 
-    # Since we don't store "Score to Par" on entry directly (calculated on frontend),
-    # we need a way to get it. 
-    # simpler: Use `tournament_strokes`.
-    # BUT players might be on different holes.
-    # Player A: -5 thru 12.
-    # Player B: -4 thru 15.
-    # We need "Projected Final Score" = Current Score To Par + Expected Score on Remaining.
-    
-    # Problem: `tournament_strokes` is raw strokes.
-    # We need `current_score_to_par`.
-    
-    # Let's rebuild the score_to_par efficiently.
-    # We know the course total par (e.g. 72).
-    # If round 1, thru 12. Par so far is par(1)+...+par(12).
-    # Score to par = strokes - par_so_far.
+    # Update: Use actual hole_results to calculate score_to_par instead of fuzzy math
     
     course = tournament.course
     holes = list(course.holes.order_by('number'))
-    pars = [h.par for h in holes] # 0-indexed, but hole 1 is index 0
-    total_par_72 = sum(pars)
+    par_map = {h.number: h.par for h in holes}
+    
+    # Get all hole results for active players (who made cut)
+    # This is efficient because 'entries' are already filtered for cut=False
+    entry_ids = [e.id for e in entries]
+    
+    # We can fetch all results in one go, but grouping them by entry_id in Python is easier
+    # Or, we can iterate entries and use the prefetched `hole_results` (Django prefetch_related)
+    # The ViewSet usually prefetches `hole_results`.
     
     active_players = []
-    
     current_round = tournament.current_round
-    
-    # Helper to get par for holes 1..N
-    # (Assuming standard start at 1 for simplicity in calc, split tees makes this harder but manageable)
-    # We will assume "thru_hole" means 1..thru_hole for the *current* round.
-    # Previous rounds are assumed complete (18 holes).
-    
-    par_thru_18 = sum(pars)
+    total_holes = 4 * 18
     
     for e in entries:
-        # Calculate Current Score To Par
-        # Past rounds:
-        # We can sum hole_results minus pars? Expensive.
-        # Approximation:
-        # If we trust `tournament_strokes`:
-        # Par Played = (Round-1) * 72 + Par(thru_hole)
-        # Exception: Cut players (already filtered), WD.
+        # 1. Calculate Score To Par EXACTLY
+        # Use prefetched results if available, else query (should be prefetched)
+        results = e.hole_results.all()
         
-        # Split tee logic:
-        # If group started on 10?
-        # This is getting complex for a quick sim.
+        strokes = 0
+        par = 0
+        completed_holes_count = 0
         
-        # Better heuristic: Use `today_to_par` + `total_to_par` logic if available.
-        # We don't have it on the model.
+        for hr in results:
+            strokes += hr.strokes
+            par += par_map.get(hr.hole_number, 4)
+            completed_holes_count += 1
+            
+        score_to_par = strokes - par
         
-        # Let's calculate Par Played for this entry.
-        # Look at `hole_results`.
-        # This is expensive.
-        
-        # Optimization:
-        # Assuming `hole_results` is prefetched? It is in the ViewSet but maybe not here.
-        # We will assume standard order (1..thru) for now.
-        
-        # Calculate 'Par So Far'
-        # played_holes_count = (current_round - 1) * 18 + e.thru_hole
-        # par_so_far = par_for_first_N_holes(played_holes_count)? 
-        # No, repeated 18s.
-        
-        par_so_far = (current_round - 1) * par_thru_18
-        
-        # Current round par
-        # If split tee and started on 10?
-        # We don't know easily without looking at group.
-        # Let's assume standard start for probability calculation simplicity.
-        # It won't be off by more than 1-2 strokes usually.
-        thru = e.thru_hole
-        par_so_far += sum(pars[:thru])
-        
-        score_to_par = e.tournament_strokes - par_so_far
-        
-        # Calculate Remaining Holes
-        # Total holes in tournament = 4 * 18 = 72
-        # Holes remaining = 72 - ((current_round - 1)*18 + thru)
-        total_holes = 4 * 18
-        played_holes = (current_round - 1) * 18 + thru
-        remaining = total_holes - played_holes
-        
+        # 2. Check Remaining Holes
+        # If simulation is imperfect, `completed_holes_count` is the truth.
+        remaining = total_holes - completed_holes_count
         if remaining < 0: remaining = 0
         
-        # Skill rating (0.0 - 100.0) -> Expected strokes per hole vs Par
-        # 100 skill (Scheffler) -> -0.05 strokes per hole (birdie machine)
-        # 50 skill -> +0.10 strokes per hole
-        # 0 skill -> +0.30 strokes per hole
-        
-        # This is a heuristic.
-        # Overall ~90+ is elite.
+        # 3. Skill Rating
         overall = 75
-        if e.golfer:
+        if e.is_human:
+            overall = 92
+        elif e.golfer:
             overall = e.golfer.overall
-        
-        # Skill factor: Map 50..100 to +0.10 .. -0.15
-        # Linear interp
-        # m = (-0.15 - 0.10) / (100 - 50) = -0.25 / 50 = -0.005
-        # y - y1 = m(x - x1)
-        # val = 0.10 + -0.005 * (overall - 50)
+            
         skill_adj = 0.10 - 0.005 * (overall - 50)
         
-        # Expected Final Score
-        # Current To Par + (Remaining * Skill Adj)
+        # 4. Expected Final Score
         exp_final = score_to_par + (remaining * skill_adj)
         
-        # Variance
-        # Std dev per hole approx 0.45
-        # Total variance = 0.45 * sqrt(remaining)
         sigma = 0.45 * math.sqrt(remaining) if remaining > 0 else 0.001
         
         active_players.append({
@@ -140,20 +81,14 @@ def calculate_win_probabilities(tournament: Tournament) -> Dict[str, float]:
         return {}
 
     # 2. Run Simulations
-    SIMULATIONS = 1000
+    SIMULATIONS = 2000 # Increased for better resolution
     
-    # Optimization: Filter out players who are mathematically eliminated?
-    # e.g. if Exp + 3*Sigma < Best_Exp - 3*Best_Sigma
-    # Let's keep it simple for now. 1000 iter is fast.
-    
-    # Sort by expected score to see who is relevant
+    # Sort by expected score
     active_players.sort(key=lambda x: x["exp"])
     
-    # Only simulate top 20? 
-    # If someone is 20 strokes back, prob is 0.
-    # Let's prune anyone > 15 strokes off the lead 'expected'.
+    # Widen the contender window slightly to capture "tied for lead" outliers
     leader_exp = active_players[0]["exp"]
-    contenders = [p for p in active_players if p["exp"] < leader_exp + 12]
+    contenders = [p for p in active_players if p["exp"] < leader_exp + 15] # Widened from 12 to 15
     
     if not contenders:
         contenders = active_players[:5] # Fallback

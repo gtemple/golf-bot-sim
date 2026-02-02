@@ -7,9 +7,9 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.courses.models import Hole
-from apps.tournaments.models import Tournament, HoleResult, TournamentEvent
-from apps.tournaments.serializers import TournamentSerializer, TournamentCreateSerializer
+from apps.courses.models import Hole, Course
+from apps.tournaments.models import Tournament, HoleResult, TournamentEvent, Season, TournamentEntry
+from apps.tournaments.serializers import TournamentSerializer, TournamentCreateSerializer, SeasonSerializer
 from apps.tournaments.services.pace import minutes_for_hole
 from apps.tournaments.services.routing import next_hole
 from apps.tournaments.services.scoring import simulate_strokes_for_entry, simulate_strokes_for_entry_with_stats
@@ -152,15 +152,23 @@ class TournamentViewSet(viewsets.ModelViewSet):
         """
         Set entry.position with ties sharing the same rank.
         Uses tournament_strokes as ordering (lowest is best).
+        We sort by 'cut' first to ensure players who missed the cut (and have fewer strokes)
+        are ranked below active players.
         """
-        entries = list(tournament.entries.order_by("tournament_strokes", "id"))
+        entries = list(tournament.entries.order_by("cut", "tournament_strokes", "id"))
         last_score = None
+        last_cut = None
         rank = 0
         for i, e in enumerate(entries, start=1):
             score = getattr(e, "tournament_strokes", None)
-            if last_score is None or score != last_score:
+            is_cut = e.cut
+            
+            # If score changes OR cut status changes, update rank
+            if last_score is None or score != last_score or is_cut != last_cut:
                 rank = i
                 last_score = score
+                last_cut = is_cut
+            
             e.position = rank
             e.save(update_fields=["position"])
 
@@ -404,98 +412,47 @@ class TournamentViewSet(viewsets.ModelViewSet):
         """
         if tournament.current_round > 2:
             return
-
-        # We need the "Total Score" relative to par effectively.
-        # But wait, raw strokes depends on how many holes played.
-        # "Score to Par" is the universal metric.
-        # But we don't store "Score to Par" on the entry directly, we calculate it.
-        # Actually, tournament_strokes is just sum of strokes. 
-        # Comparing raw strokes is unfair if someone played 9 holes vs 18 holes.
-        # So we MUST calculate Score To Par for everyone.
         
-        # Optimization: Score To Par = Total Strokes - (Par of holes completed)
-        # We can calculate this.
-        
-        entries = list(tournament.entries.all())
-        scores = []
-        
-        # Get all hole pars once
+        # We need par map
         holes = Hole.objects.filter(course=tournament.course).order_by('number')
         par_map = {h.number: h.par for h in holes}
+
+        results = HoleResult.objects.filter(entry__tournament=tournament).values('entry_id', 'strokes', 'hole_number')
         
-        # Prefetch hole results for efficiency? 
-        # They are already in tournament.entries via prefetch in ViewSet, 
-        # but that might be stale in 'tick'.
-        # Let's rely on tournament_strokes from _recompute_positions?
-        # tournament_strokes has total strokes.
-        # We need total par for holes played.
+        # Group in Python to avoid complex DB aggregations involving mapped par
+        # entry_id -> {strokes: 0, par: 0}
+        player_scores = {}
         
-        # This is expensive to do every tick for 150 players.
-        # Let's do a simplified version or just iterate.
-        # 150 iterations is nothing for Python.
-        
-        for entry in entries:
-            # Get holes played count: this is hard because 'thru_hole' is per round.
-            # We need all holes played across all rounds.
-            # Simpler: We know in R1 everyone played 'thru_hole' holes.
-            # in R2 everyone played 18 (R1) + 'thru_hole' (R2).
+        for hr in results:
+            eid = hr['entry_id']
+            if eid not in player_scores:
+                player_scores[eid] = {"strokes": 0, "par": 0}
             
-            # Actually, `tournament_strokes` is reliable `sum(strokes)`.
-            # We just need `sum(par)` for those specific holes.
+            player_scores[eid]["strokes"] += hr['strokes']
+            player_scores[eid]["par"] += par_map.get(hr['hole_number'], 4)
             
-            # Calculate Total Par so far
-            # How do we know EXACTLY which holes they played?
-            # We assume order 1..18.
-            # R1: holes 1..thru_hole
-            # R2: 1..18 (R1) + 1..thru_hole (R2)
+        # Calculate to_par list
+        to_par_list = []
+        for eid, data in player_scores.items():
+            to_par = data["strokes"] - data["par"]
+            to_par_list.append(to_par)
             
-            # Caveat: Split tees start at 10.
-            # If start at 10, played 10,11,12...
-            # This logic gets complex with split tees.
-            
-            # Alternative: Projected Cut is usually based on "End of Round 2".
-            # If I am +2 thru 9, I am projected +2.
-            # So "Score to Par" is correct.
-            
-            # To get Score To Par correctly without complex par summing:
-            # We can aggregate from HoleResult stats if we stored 'par' there. We don't.
-            # But we can query HoleResult count? No.
-            
-            # Let's assume standard pars for now (Par 72).
-            # No, that's wrong.
-            
-            # Correct approach:
-            # Calculate score_to_par for each entry.
-            # entry.score_to_par property?
-            pass
-            
-            # Let's check if we have a helper for this.
-            # We don't.
-            # Let's just calculate it.
-            
-            total_strokes = entry.tournament_strokes
-            
-            # Calculate par for holes played
-            # This requires knowing WHICH holes.
-            # We can fetch all HoleResults for this entry.
-            results = entry.hole_results.all() # Prefitched?
-            
-            # If we blindly trust prefetch:
-            total_par = 0
-            for hr in results:
-                # We need par of hr.hole_number
-                p = par_map.get(hr.hole_number, 4)
-                total_par += p
-            
-            score_to_par = total_strokes - total_par
-            scores.append(score_to_par)
-            
-        scores.sort()
+        if not to_par_list:
+            return
+
+        to_par_list.sort()
         
         # Top 65 (index 64)
         cut_size = tournament.cut_size or 65
-        if len(scores) > cut_size:
-            projected_cut = scores[cut_size - 1]
+        projected_cut = 0
+        
+        if len(to_par_list) > cut_size:
+            projected_cut = to_par_list[cut_size - 1]
+        else:
+            projected_cut = to_par_list[-1]
+
+        # Only update if changed
+        if tournament.projected_cut_score != projected_cut:
             tournament.projected_cut_score = projected_cut
             tournament.save(update_fields=["projected_cut_score"])
 
@@ -664,6 +621,41 @@ class TournamentViewSet(viewsets.ModelViewSet):
                     # bot
                     entry.thru_hole = max(entry.thru_hole, hole_num)
                     self._update_entry_totals(entry, tournament.current_round)
+
+                # SUDDEN DEATH CHECK (Playoffs - Fast Forward)
+                game_over = False
+                if tournament.status == "playoff":
+                    results = HoleResult.objects.filter(
+                        round_number=tournament.current_round,
+                        hole_number=hole_num,
+                        entry__in=[gm.entry for gm in members]
+                    )
+                    
+                    if results.count() == len(members):
+                        scores = [(r.entry, r.strokes) for r in results]
+                        if scores:
+                            min_score = min(s[1] for s in scores)
+                            survivors = [s[0] for s in scores if s[1] == min_score]
+                            eliminated = [s[0] for s in scores if s[1] > min_score]
+                            
+                            if len(survivors) == 1:
+                                winner = survivors[0]
+                                tournament.status = "finished"
+                                tournament.save(update_fields=["status"])
+                                group.is_finished = True
+                                game_over = True
+                                TournamentEvent.objects.create(
+                                    tournament=tournament,
+                                    round_number=tournament.current_round,
+                                    text=f"PLAYOFF ENDED! {winner.display_name} wins with a {min_score} on #{hole_num}!",
+                                    importance=1
+                                )
+                            elif len(eliminated) > 0:
+                                for loser in eliminated:
+                                    group.members.filter(entry=loser).delete() 
+
+                if game_over:
+                    break
 
                 # advance group progress
                 group.holes_completed += 1
@@ -838,6 +830,47 @@ class TournamentViewSet(viewsets.ModelViewSet):
                     # bot
                     entry.thru_hole = max(entry.thru_hole, hole_num)
                     self._update_entry_totals(entry, tournament.current_round)
+
+                # SUDDEN DEATH CHECK (Playoffs)
+                game_over = False
+                if tournament.status == "playoff":
+                    results = HoleResult.objects.filter(
+                        round_number=tournament.current_round,
+                        hole_number=hole_num,
+                        entry__in=[gm.entry for gm in members]
+                    )
+                    
+                    if results.count() == len(members):
+                        scores = [(r.entry, r.strokes) for r in results]
+                        if scores:
+                            min_score = min(s[1] for s in scores)
+                            survivors = [s[0] for s in scores if s[1] == min_score]
+                            eliminated = [s[0] for s in scores if s[1] > min_score]
+                            
+                            if len(survivors) == 1:
+                                winner = survivors[0]
+                                tournament.status = "finished"
+                                tournament.save(update_fields=["status"])
+                                group.is_finished = True
+                                game_over = True
+                                TournamentEvent.objects.create(
+                                    tournament=tournament,
+                                    round_number=tournament.current_round,
+                                    text=f"PLAYOFF ENDED! {winner.display_name} wins with a {min_score} on #{hole_num}!",
+                                    importance=1
+                                )
+                            elif len(eliminated) > 0:
+                                for loser in eliminated:
+                                    group.members.filter(entry=loser).delete()
+                                    TournamentEvent.objects.create(
+                                        tournament=tournament,
+                                        round_number=tournament.current_round,
+                                        text=f"{loser.display_name} eliminated from {len(scores)}-man playoff on #{hole_num}.",
+                                        importance=2
+                                    )
+                
+                if game_over:
+                    break
 
                 # advance group progress
                 group.holes_completed += 1
@@ -1047,3 +1080,219 @@ class TournamentViewSet(viewsets.ModelViewSet):
 
         tournament = self.get_queryset().get(pk=tournament.pk)
         return Response(TournamentSerializer(tournament).data)
+
+
+class HistoryViewSet(viewsets.ViewSet):
+    """
+    Simple read-only viewset for historical data.
+    """
+    def list(self, request):
+        # 1. Past Champions
+        finished_tournaments = Tournament.objects.filter(status="finished").order_by("-start_time")
+        
+        history_list = []
+        winner_counts = {}
+
+        for t in finished_tournaments:
+            # Determine winners (handle ties)
+            winners_qs = t.entries.filter(position=1)
+            if not winners_qs.exists():
+                winner_names = "Abandoned"
+                score = 0
+                to_par = 0
+            else:
+                winner_objs = list(winners_qs)
+                winner_names = ", ".join([w.display_name for w in winner_objs])
+                
+                # Track career wins
+                for w in winner_objs:
+                    name = w.display_name
+                    winner_counts[name] = winner_counts.get(name, 0) + 1
+                
+                # Score info
+                first_winner = winner_objs[0]
+                score = first_winner.tournament_strokes
+                
+                # Calculate Par
+                # Need hole pars
+                holes = t.course.holes.all()
+                par_total = sum(h.par for h in holes) * t.current_round 
+                
+                to_par = score - par_total
+            
+            history_list.append({
+                "id": t.id,
+                "name": t.name,
+                "date": t.start_time,
+                "winner": winner_names,
+                "score": score,
+                "to_par": to_par,
+                "course": t.course.name,
+                "rounds": t.current_round
+            })
+
+        # 2. Career Leaderboard
+        career_leaders = [
+            {"name": name, "wins": count} 
+            for name, count in winner_counts.items()
+        ]
+        career_leaders.sort(key=lambda x: x["wins"], reverse=True)
+
+        return Response({
+            "tournaments": history_list,
+            "career_wins": career_leaders[:20] # Top 20
+        })
+
+
+class SeasonViewSet(viewsets.ModelViewSet):
+    queryset = Season.objects.all().prefetch_related('tournaments')
+    serializer_class = SeasonSerializer
+
+    def create(self, request, *args, **kwargs):
+        # Create the Season object
+        name = request.data.get('name', 'New Season')
+        
+        # Human settings
+        humans = request.data.get('humans', []) 
+        if not humans:
+            # Fallback for old API usage or quick create
+            human_name = request.data.get("human_name", "Player 1")
+            humans = [{"name": human_name, "country": "USA", "handedness": "R"}]
+
+        # Field settings
+        golfer_count = request.data.get('golfer_count', 156)
+        field_type = request.data.get("field_type", "top_ranked")
+
+        season = Season.objects.create(name=name, is_active=True)
+        
+        # Course Selection
+        course_ids = request.data.get('course_ids', [])
+        if course_ids:
+             # Preserve order of selection
+             courses = []
+             for cid in course_ids:
+                 try:
+                     courses.append(Course.objects.get(id=cid))
+                 except Course.DoesNotExist:
+                     pass
+        else:
+             courses = list(Course.objects.all())
+
+        if not courses:
+             return Response({"error": "No courses available to generate season"}, status=400)
+             
+        # Create 10 events (or fewer if not enough courses, repeating if necessary)
+        schedule_names = [
+            "The Opening Drive",
+            "Desert Classic",
+            "Coastal Open",
+            "The Invitational",
+            "Spring Masters",
+            "Mid-Season Championship",
+            "Highland Links",
+            "Capital City Open",
+            "The Playoff",
+            "Tour Championship"
+        ]
+        
+        # If user selected courses, we might want to match the number of events to the number of courses selected
+        # UNLESS they want a longer season iterating through them.
+        # Let's say: If course_ids provided, create exactly that many events using those courses in order?
+        # OR: Stick to standard 10 events and cycle through selected courses.
+        # User request: "select what courses will be in the season". 
+        # Interpretation: The season consists of THESE courses. If they pick 5, maybe season is 5 events?
+        # Let's prefer the list size if explicit list provided, otherwise default 10.
+        
+        if course_ids:
+            # Generate generic names if we run out of schedule_names
+            iter_count = len(courses)
+        else:
+            iter_count = 10 
+        
+        from apps.tournaments.serializers import TournamentCreateSerializer
+        import random
+        from django.utils import timezone
+        
+        for i in range(iter_count):
+            course = courses[i % len(courses)]
+            
+            # Name
+            if i < len(schedule_names):
+                event_name = schedule_names[i]
+            else:
+                event_name = f"Season Event #{i+1}"
+            
+            # Start date spaced out by 1 week
+            start_time = timezone.now() + timezone.timedelta(weeks=i)
+
+            # Construct data for serializer
+            data = {
+                "name": event_name,
+                "course_id": course.id,
+                "humans": humans, # Pass the full list of humans
+                "golfer_count": golfer_count,
+                "field_type": field_type,
+                "is_ryder_cup": False,
+                "season_id": season.id,
+                "season_order": i + 1,
+                "start_time": start_time,
+            }
+            
+            # We need to make sure TournamentCreateSerializer handles 'humans' list correctly
+            # It does: `humans = serializers.ListField(...)`
+            
+            serializer = TournamentCreateSerializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            
+        return Response(SeasonSerializer(season).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def standings(self, request, pk=None):
+        season = self.get_object()
+        
+        # Points Logic:
+        # 1st: 500, 2nd: 300, 3rd: 190, 4th: 135, 5th: 110, etc.
+        # Simplified: 500, 300, 200, 150, 100, 90, 80 ... down to 1 point
+        
+        POINTS_TABLE = {
+            1: 500, 2: 300, 3: 190, 4: 135, 5: 110,
+            6: 100, 7: 90, 8: 85, 9: 80, 10: 75
+        } # Fallback: max(0, 75 - (pos-10)*2)
+        
+        # Aggregate
+        player_stats = {} # { "Display Name": {points: 0, wins: 0, events: 0, top10: 0} }
+        
+        tournaments = season.tournaments.filter(status='finished')
+        
+        for t in tournaments:
+            entries = t.entries.all()
+            for e in entries:
+                if not e.position: continue
+                
+                name = e.display_name
+                if name not in player_stats:
+                    player_stats[name] = {"name": name, "points": 0, "wins": 0, "events": 0, "top10": 0, "is_human": e.is_human}
+                
+                s = player_stats[name]
+                s["events"] += 1
+                
+                # Calc Points
+                pos = e.position
+                pts = 0
+                if pos in POINTS_TABLE:
+                    pts = POINTS_TABLE[pos]
+                elif pos <= 50:
+                    pts = max(1, 75 - (pos-10)*2)
+                
+                s["points"] += pts
+                
+                if pos == 1: s["wins"] += 1
+                if pos <= 10: s["top10"] += 1
+        
+        # Convert to list and sort
+        standings = list(player_stats.values())
+        standings.sort(key=lambda x: x['points'], reverse=True)
+        
+        return Response(standings)
+

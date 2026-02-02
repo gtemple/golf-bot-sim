@@ -5,7 +5,7 @@ from django.db.models import Sum, Q
 from django.utils.html import format_html
 from django.utils import timezone
 
-from .models import Tournament, TournamentEntry, Group, GroupMember, HoleResult
+from .models import Tournament, TournamentEntry, Group, GroupMember, HoleResult, Season
 
 
 # ---------- Inlines ----------
@@ -214,3 +214,14 @@ class HoleResultAdmin(admin.ModelAdmin):
     def tournament_name(self, obj: HoleResult):
         return obj.entry.tournament.name
     tournament_name.short_description = "Tournament"
+
+
+@admin.register(Season)
+class SeasonAdmin(admin.ModelAdmin):
+    list_display = ("name", "is_active", "created_at", "tournament_count")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("name",)
+    
+    def tournament_count(self, obj):
+        return obj.tournaments.count()
+    tournament_count.short_description = "Tournaments"

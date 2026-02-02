@@ -24,6 +24,9 @@ class Tournament(models.Model):
 
     name = models.CharField(max_length=200)
     course = models.ForeignKey(Course, on_delete=models.PROTECT)
+    
+    season = models.ForeignKey("Season", on_delete=models.CASCADE, null=True, blank=True, related_name="tournaments")
+    season_order = models.PositiveIntegerField(default=1)
 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="setup")
     format = models.CharField(max_length=20, choices=FORMAT_CHOICES, default="stroke")
@@ -49,6 +52,17 @@ class Tournament(models.Model):
     
     created_at = models.DateTimeField(auto_now_add=True)
 
+    def __str__(self):
+        return self.name
+
+
+class Season(models.Model):
+    name = models.CharField(max_length=200)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+    
+    # Store aggregate standings if needed, or compute on fly
+    
     def __str__(self):
         return self.name
 

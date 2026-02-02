@@ -4,6 +4,7 @@ from django.db import transaction
 from django.db.models import Sum
 
 from apps.tournaments.models import (
+    Season,
     Tournament,
     TournamentEntry,
     TournamentEvent,
@@ -13,6 +14,75 @@ from apps.tournaments.models import (
 )
 from apps.courses.models import Course
 from apps.golfers.models import Golfer
+
+
+class SeasonSerializer(serializers.ModelSerializer):
+    # Include list of tournaments (summary)
+    tournaments = serializers.SerializerMethodField()
+    leaders = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Season
+        fields = ["id", "name", "created_at", "is_active", "tournaments", "leaders"]
+
+    def get_leaders(self, obj):
+        # Calculate top 3 leaders based on finished tournaments
+        # Points scale (simplified FedEx)
+        points_map = {1: 500, 2: 300, 3: 190, 4: 135, 5: 110}
+        
+        standings = {} # name -> points
+        
+        # Get finished tournaments
+        finished = obj.tournaments.filter(status='finished')
+        
+        for t in finished:
+            # Get top 5 finishers to save DB hits (we only need leaders)
+            # Actually we need all because someone might consistently finish 6th
+            # But for "Preview" card, just approximating with top finishers is barely acceptable?
+            # No, let's do top 10 per tournament.
+            pass # optimization TODO
+            
+        # Better approach: Aggregate over all entries in finished tournaments of this season
+        # This is a bit complex for a serializer method field called on a list.
+        # Let's simple query: 
+        entries = TournamentEntry.objects.filter(
+            tournament__season=obj, 
+            tournament__status='finished',
+            position__lte=10
+        ).values('display_name', 'position')
+        
+        for e in entries:
+            p = points_map.get(e['position'], 0)
+            if p > 0:
+                name = e['display_name']
+                standings[name] = standings.get(name, 0) + p
+        
+        # Sort
+        sorted_standings = sorted(standings.items(), key=lambda x: x[1], reverse=True)[:3]
+        return [{"name": name, "points": pts} for name, pts in sorted_standings]
+
+    def get_tournaments(self, obj):
+        # Lightweight representation
+        qs = obj.tournaments.all().order_by("season_order")
+        return [
+            {
+                "id": t.id,
+                "name": t.name,
+                "status": t.status,
+                "course_name": t.course.name,
+                "season_order": t.season_order,
+                "current_round": t.current_round,
+                "winner": self._get_winner_name(t)
+            }
+            for t in qs
+        ]
+
+    def _get_winner_name(self, tournament):
+        if tournament.status != 'finished':
+            return None
+        # Naive check: entry with position=1
+        w = tournament.entries.filter(position=1).first()
+        return w.display_name if w else None
 
 
 class TournamentEventSerializer(serializers.ModelSerializer):
@@ -29,6 +99,8 @@ class HoleResultSerializer(serializers.ModelSerializer):
 
 class TournamentEntrySerializer(serializers.ModelSerializer):
     hole_results = HoleResultSerializer(many=True, read_only=True)
+    # Expose golfer rating for frontend sorting/display
+    overall_rating = serializers.IntegerField(source='golfer.overall', read_only=True, allow_null=True)
 
     class Meta:
         model = TournamentEntry
@@ -37,6 +109,7 @@ class TournamentEntrySerializer(serializers.ModelSerializer):
             "display_name",
             "is_human",
             "golfer",
+            "overall_rating", # Added
             "total_strokes",
             "tournament_strokes",
             "thru_hole",
@@ -103,6 +176,8 @@ class TournamentSerializer(serializers.ModelSerializer):
             "session_history",
             "round_conditions",
             "live_win_probs",
+            "season", 
+            "season_order",
             "entries",
             "groups",
         ]
@@ -179,70 +254,12 @@ class TournamentSerializer(serializers.ModelSerializer):
         
         return data[:5]
     
-    def get_projected_cut(self, obj):
-        """
-        Calculate projected cut line during R1 and R2 (before cut is applied).
-        Uses current Score To Par for all players to determine the cut line.
-        """
-        # Only show projected cut during rounds 1-2, before cut is applied
-        if obj.current_round > 2 or obj.cut_applied:
-            return None
-        
-        entries = list(obj.entries.all())
-        if not entries:
-            return None
-        
-        # Get course pars to compute Score To Par correctly (handling partial rounds)
-        course_pars = {h.number: h.par for h in obj.course.holes.all()}
-        
-        scored = []
-        for e in entries:
-            # Calculate current cumulative Score To Par using hole results
-            # This handles partial rounds (R1 mid-round) and complete rounds correctly.
-            # (strokes - par) for only the holes played.
-            results = e.hole_results.all()
-            
-            if not results:
-                # Haven't started or played any holes -> Even par
-                scored.append((e.id, 0))
-                continue
-            
-            total_strokes = 0
-            total_par = 0
-            
-            for r in results:
-                # Include results from R1 and R2
-                if r.round_number > 2:
-                    continue
-                
-                total_strokes += r.strokes
-                total_par += course_pars.get(r.hole_number, 4)
-            
-            score_to_par = total_strokes - total_par
-            scored.append((e.id, score_to_par))
-        
-        # Sort by score (lowest is best)
-        scored.sort(key=lambda x: x[1])
-        
-        cut_size = obj.cut_size or 65
-        if len(scored) <= cut_size:
-            return None  # No cut needed
-        
-        # Find the cut score (top cut_size + ties)
-        # scored is a list of (id, score_to_par)
-        cut_val = scored[cut_size - 1][1]
-        
-        # Count stats
-        at_cut_line = sum(1 for _, score in scored if score == cut_val)
-        inside_cut = sum(1 for _, score in scored if score < cut_val)
-        
-        return {
-            "cut_score": cut_val, # For display purposes, this is the relative score
-            "cut_to_par": cut_val,
-            "cut_position": cut_size,
-            "players_at_line": at_cut_line,
-            "players_inside": inside_cut,
-        }
+    # def get_projected_cut(self, obj):
+    #     """
+    #     Duplicated method removed. We rely on the stored `projected_cut_score` 
+    #     which is updated by the simulation tick.
+    #     """
+    #     return obj.projected_cut_score
         
 
 class TournamentCreateSerializer(serializers.Serializer):
@@ -264,7 +281,9 @@ class TournamentCreateSerializer(serializers.Serializer):
         default=list,
         help_text="List of human player objects: {name, country, handedness, avatar_color}",
     )
-
+    
+    season_id = serializers.IntegerField(required=False, allow_null=True)
+    season_order = serializers.IntegerField(required=False, default=1)
 
     start_time = serializers.DateTimeField(required=False)
 
@@ -302,6 +321,8 @@ class TournamentCreateSerializer(serializers.Serializer):
             start_time=start_time,
             current_time=start_time,
             current_round=1,
+            season_id=validated_data.get("season_id"),
+            season_order=validated_data.get("season_order", 1),
         )
 
         # Select golfers based on field type

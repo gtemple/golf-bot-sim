@@ -11,6 +11,7 @@ import {
   Clock,
 } from 'lucide-react'
 import { api } from '../api/client'
+import LiveTicker from '../components/LiveTicker'
 
 /** ---------- helpers ---------- */
 
@@ -86,16 +87,30 @@ const groupStatus = (group) => {
 
 function PlayerScorecard({ player, group, tournament, course, onBack }) {
   const holes = course?.holes || []
-  const round = tournament?.current_round
+  const currentRound = tournament?.current_round || 1
+  const [selectedRound, setSelectedRound] = useState(currentRound)
+  
+  // Update selected round when tournament current round changes (e.g. simulation tick)
+  useEffect(() => {
+    if (currentRound) {
+        // If we were looking at the "current" round, keep following it
+        // Or if the new round is available, maybe we should switch? 
+        // For now, let's just default to current if the previous selection is invalid,
+        // but typically user might want to stay on a past round?
+        // Let's autoswitch to the latest round effectively if the user was on the latest round
+        setSelectedRound(prev => (prev >= currentRound - 1) ? currentRound : prev)
+    }
+  }, [currentRound])
+
   const parMap = useMemo(() => buildParMap(course), [course])
 
   const totalToPar = useMemo(
     () => entryToPar(player, parMap, null),
     [player, parMap]
   )
-  const todayToPar = useMemo(
-    () => entryToPar(player, parMap, round),
-    [player, parMap, round]
+  const roundToPar = useMemo(
+    () => entryToPar(player, parMap, selectedRound),
+    [player, parMap, selectedRound]
   )
   
   const winProb = useMemo(() => {
@@ -117,10 +132,7 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
     const counts = { eagle: 0, birdie: 0, par: 0, bogey: 0, double: 0 }
     
     player.hole_results.forEach(r => {
-      // Only count current round? Or tournament?
-      // User liked "bogeys, pars, etc", usually round-based but tournament is also cool.
-      // Let's stick to current round for relevance.
-      if (Number(r.round_number) !== Number(round)) return
+      if (Number(r.round_number) !== Number(selectedRound)) return
       
       const p = parMap.get(Number(r.hole_number))
       if (!p) return
@@ -133,7 +145,7 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
       else counts.double++
     })
     return counts
-  }, [player, round, parMap])
+  }, [player, selectedRound, parMap])
   
   const maxVal = Math.max(...Object.values(scoring), 1)
 
@@ -153,14 +165,38 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
     )
   }
 
+  // Round Selector
+  const roundTabs = []
+  for (let i = 1; i <= currentRound; i++) {
+    roundTabs.push(i)
+  }
+
   return (
     <div className="max-w-7xl mx-auto px-6 py-4">
-      <button
-        onClick={onBack}
-        className="mb-4 px-4 py-2 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 rounded-lg text-sm font-medium transition-colors shadow-sm"
-      >
-        ← Back to Leaderboard
-      </button>
+      <div className="flex justify-between items-center mb-4">
+          <button
+            onClick={onBack}
+            className="px-4 py-2 bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 rounded-lg text-sm font-medium transition-colors shadow-sm"
+          >
+            ← Back to Leaderboard
+          </button>
+          
+          <div className="flex bg-gray-100 rounded-lg p-1 border border-gray-200 shadow-sm">
+             {roundTabs.map(r => (
+                 <button
+                    key={r}
+                    onClick={() => setSelectedRound(r)}
+                    className={`px-3 py-1 text-sm font-medium rounded-md transition-all ${
+                        selectedRound === r 
+                        ? 'bg-white text-green-800 shadow font-bold' 
+                        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+                    }`}
+                 >
+                    Round {r}
+                 </button>
+             ))}
+          </div>
+      </div>
 
       {/* Player Info */}
       <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden mb-6">
@@ -178,19 +214,23 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
                 </span>
               </div>
               <p className="text-sm text-green-100">
-                {player.country || '—'} • {player.handedness || 'R'} • Round {round}
+                {player.country || '—'} • {player.handedness || 'R'} • Round {selectedRound}
               </p>
             </div>
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 divide-x divide-gray-100 border-b border-gray-100">
            <div className="p-4 flex flex-col justify-center items-center">
-              <p className="text-xs text-gray-400 uppercase font-bold text-center">Score Today</p>
-              <div className="text-2xl font-bold text-gray-900 mt-1">{formatToPar(todayToPar)}</div>
+              <p className="text-xs text-gray-400 uppercase font-bold text-center">Score (R{selectedRound})</p>
+              <div className="text-2xl font-bold text-gray-900 mt-1">{formatToPar(roundToPar)}</div>
            </div>
            <div className="p-4 flex flex-col justify-center items-center">
               <p className="text-xs text-gray-400 uppercase font-bold text-center">Thru</p>
-              <div className="text-2xl font-bold text-gray-900 mt-1">{player.thru_hole || 0}</div>
+              <div className="text-2xl font-bold text-gray-900 mt-1">
+                {(selectedRound < currentRound) 
+                    ? 'F' 
+                    : (player.thru_hole || 0)}
+              </div>
            </div>
            
            <div className="p-4 flex flex-col justify-center items-center bg-blue-50/50">
@@ -204,7 +244,7 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
            <div className="p-4 col-span-2">
              <div className="h-full flex items-center justify-center w-full">
                <div className="w-full">
-                 <StatsEmbed player={player} holes={holes} variant="large" />
+                 <StatsEmbed player={player} holes={holes} variant="large" round={selectedRound} />
                </div>
              </div>
            </div>
@@ -246,7 +286,10 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
       {group && (
         <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
           <div className="bg-gray-50 px-6 py-4 border-b border-gray-200">
-            <h3 className="text-lg font-bold text-gray-900">Playing Partners</h3>
+            <h3 className="text-lg font-bold text-gray-900">
+                Playing Partners 
+                {selectedRound < currentRound && <span className="text-gray-400 font-normal ml-2">(Round {selectedRound})</span>}
+            </h3>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -277,7 +320,7 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
                     </td>
                     {holes.map(h => {
                       const score = (member.entry.hole_results || []).find(
-                        r => Number(r.hole_number) === Number(h.number) && Number(r.round_number) === Number(round)
+                        r => Number(r.hole_number) === Number(h.number) && Number(r.round_number) === Number(selectedRound)
                       )?.strokes
                       return (
                         <td key={h.number} className="px-2 py-3 text-center text-sm">
@@ -296,7 +339,7 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
                     })}
                     <td className="px-2 py-3 text-center text-sm font-bold text-gray-900">
                       {(member.entry.hole_results || [])
-                        .filter(r => Number(r.round_number) === Number(round))
+                        .filter(r => Number(r.round_number) === Number(selectedRound))
                         .reduce((sum, r) => sum + r.strokes, 0) || '—'}
                     </td>
                   </tr>
@@ -307,10 +350,10 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
           
           {/* Commentary Feed - only for featured player (player prop) */}
           <div className="bg-gray-50 border-t border-gray-200 px-6 py-4">
-             <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Live Feed - {player.display_name}</h4>
+             <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Live Feed - {player.display_name} (R{selectedRound})</h4>
              <div className="space-y-2">
                  {(player.hole_results || [])
-                    .filter(r => Number(r.round_number) === Number(round))
+                    .filter(r => Number(r.round_number) === Number(selectedRound))
                     .sort((a, b) => b.hole_number - a.hole_number) // Newest first
                     .slice(0, 3) // Last 3 holes
                     .map(r => (
@@ -325,8 +368,8 @@ function PlayerScorecard({ player, group, tournament, course, onBack }) {
                         <span className="text-gray-600 truncate">{r.stats?.commentary || 'No commentary available'}</span>
                      </div>
                  ))}
-                 {(player.hole_results || []).filter(r => Number(r.round_number) === Number(round)).length === 0 && (
-                     <div className="text-sm text-gray-400 italic">Waiting for tee off...</div>
+                 {(player.hole_results || []).filter(r => Number(r.round_number) === Number(selectedRound)).length === 0 && (
+                     <div className="text-sm text-gray-400 italic">No shots played for this round yet.</div>
                  )}
              </div>
           </div>
@@ -369,51 +412,6 @@ export default function TournamentPage() {
   }, [t, hasAutoSelected])
   */
 
-  const featuredGroup = useMemo(() => {
-    if (!t?.groups?.length) return null
-    return (
-      t.groups.find((g) => (g.members || []).some((m) => m.entry?.is_human)) || null
-    )
-  }, [t])
-
-  const nextHole = useMemo(
-    () => (featuredGroup ? nextHoleForGroup(featuredGroup) : null),
-    [featuredGroup]
-  )
-
-  const holeInfo = useMemo(() => {
-    if (!course || !nextHole) return null
-    return (course.holes || []).find((h) => Number(h.number) === Number(nextHole)) || null
-  }, [course, nextHole])
-
-  const featuredGroupSize = useMemo(
-    () => featuredGroup?.members?.length || 4,
-    [featuredGroup]
-  )
-
-  const humanGroupNotStarted = useMemo(() => {
-    if (!featuredGroup || !t) return false
-    if (featuredGroup.holes_completed > 0) return false
-    
-    // Check if any human has played holes
-    const humanPlayed = humans.some((h) => (h.thru_hole || 0) > 0)
-    if (humanPlayed) return false
-
-    // If we haven't played, check if tee time has arrived
-    if (t.current_time && featuredGroup.tee_time) {
-      if (new Date(t.current_time) >= new Date(featuredGroup.tee_time)) {
-        return false 
-      }
-    }
-    
-    return true
-  }, [featuredGroup, t, humans])
-
-  const humanGroupFinished = useMemo(() => {
-    if (!featuredGroup || !t) return false
-    // If playing holes are done (>= 18) OR status is finished
-    return (featuredGroup.holes_completed || 0) >= 18 || t.status === 'finished'
-  }, [featuredGroup, t])
 
   const entryToGroup = useMemo(() => {
     const map = new Map()
@@ -459,6 +457,116 @@ export default function TournamentPage() {
 
     return rows
   }, [t, parMap])
+
+  // TV Director Mode: Intelligently select a list of "Featured Groups" to follow
+  const interestingGroups = useMemo(() => {
+    if (!t?.groups?.length) return []
+
+    // Helper to calculate "Interest Score" for a group
+    const analyzeGroup = (g) => {
+        const members = g.members || []
+        const isHuman = members.some((m) => m.entry?.is_human)
+        
+        let bestScore = 100 // Default high
+        let maxRating = 0
+        
+        members.forEach(m => {
+            const row = leaderboardRows.find(r => r.id === m.entry?.id)
+            if (row) {
+                // Score
+                const s = row.total_to_par !== undefined ? row.total_to_par : 0
+                if (s < bestScore) bestScore = s
+                
+                // Rating
+                const r = row.is_human ? 95 : (row.overall_rating || 75)
+                if (r > maxRating) maxRating = r
+            }
+        })
+        
+        // Active Status
+        const currentTime = t.current_time ? new Date(t.current_time) : new Date()
+        const teeTime = new Date(g.tee_time)
+        const isActive = !g.is_finished && (g.holes_completed || 0) < 18 && (currentTime >= teeTime)
+        
+        return { group: g, isHuman, bestScore, maxRating, isActive, teeTime: teeTime.getTime() }
+    }
+
+    const scored = t.groups.map(analyzeGroup)
+
+    // Sort Logic:
+    // 1. Human (Always Top)
+    // 2. Active (Playing Now) > Inactive
+    // 3. Score (Lower is Better)
+    // 4. Star Power (Rating - Higher is Better)
+    // 5. Tee Time (Later is Better - usually implies better seeding/leaders)
+    scored.sort((a, b) => {
+        if (a.isHuman && !b.isHuman) return -1
+        if (!a.isHuman && b.isHuman) return 1
+        
+        if (a.isActive && !b.isActive) return -1
+        if (!a.isActive && b.isActive) return 1
+        
+        if (a.bestScore !== b.bestScore) return a.bestScore - b.bestScore
+        
+        if (a.maxRating !== b.maxRating) return b.maxRating - a.maxRating
+        
+        return b.teeTime - a.teeTime
+    })
+
+    return scored.map(s => s.group)
+  }, [t, leaderboardRows])
+
+  const featuredGroup = interestingGroups[0] || (t?.groups ? t.groups[0] : null)
+
+  const nextHole = useMemo(
+    () => (featuredGroup ? nextHoleForGroup(featuredGroup) : null),
+    [featuredGroup]
+  )
+
+  const holeInfo = useMemo(() => {
+    if (!course || !nextHole) return null
+    return (course.holes || []).find((h) => Number(h.number) === Number(nextHole)) || null
+  }, [course, nextHole])
+
+  const featuredGroupSize = useMemo(
+    () => featuredGroup?.members?.length || 4,
+    [featuredGroup]
+  )
+
+  const humanGroupNotStarted = useMemo(() => {
+    if (!featuredGroup || !t) return false
+    if (featuredGroup.holes_completed > 0) return false
+    
+    // Check if any human has played holes
+    const humanPlayed = humans.some((h) => (h.thru_hole || 0) > 0)
+    if (humanPlayed) return false
+
+    // If we haven't played, check if tee time has arrived
+    if (t.current_time && featuredGroup.tee_time) {
+      if (new Date(t.current_time) >= new Date(featuredGroup.tee_time)) {
+        return false 
+      }
+    }
+    
+    return true
+  }, [featuredGroup, t, humans])
+
+  const humanGroupFinished = useMemo(() => {
+    if (!featuredGroup || !t) return false
+    // If playing holes are done (>= 18) OR status is finished
+    return (featuredGroup.holes_completed || 0) >= 18 || t.status === 'finished'
+  }, [featuredGroup, t])
+
+  const cutLineIndex = useMemo(() => {
+    const cut = t?.projected_cut
+    if (cut === undefined || cut === null || !t || t.current_round > 2) return -1
+    
+    // Find first player who is missing the cut (> cut)
+    const firstMissIndex = leaderboardRows.findIndex(r => (r.total_to_par ?? 9999) > cut)
+    
+    if (firstMissIndex <= 0) return -1 // Everyone missed or started out
+    return firstMissIndex - 1 // Draw line after this index
+  }, [leaderboardRows, t?.projected_cut, t?.current_round])
 
   const totalPages = Math.ceil(leaderboardRows.length / ENTRIES_PER_PAGE)
 
@@ -629,7 +737,7 @@ export default function TournamentPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-green-50">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-green-50 pb-12">
       {/* Header */}
       <div className="relative overflow-hidden bg-gradient-to-br from-green-900 via-green-800 to-green-900 text-white">
         <div className="absolute inset-0 opacity-10">
@@ -725,7 +833,7 @@ export default function TournamentPage() {
           </div>
 
           {/* Projected Cut Line */}
-          {t?.projected_cut && (
+          {(t?.projected_cut !== null && t?.projected_cut !== undefined && t?.current_round <= 2) && (
             <div className="mt-6 p-4 bg-yellow-500/20 rounded-lg border border-yellow-400/40 backdrop-blur-sm">
               <div className="flex items-start gap-3">
                 <Scissors className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
@@ -735,19 +843,14 @@ export default function TournamentPage() {
                   </h3>
                   <p className="text-sm text-yellow-50">
                     <span className="font-bold text-lg">
-                      {t.projected_cut.cut_to_par === 0
+                      {t.projected_cut === 0
                         ? 'E'
-                        : t.projected_cut.cut_to_par > 0
-                          ? `+${t.projected_cut.cut_to_par}`
-                          : t.projected_cut.cut_to_par}
+                        : t.projected_cut > 0
+                          ? `+${t.projected_cut}`
+                          : t.projected_cut}
                     </span>{' '}
                     <span className="text-yellow-200">
-                      (Top {t.projected_cut.cut_position} + ties)
-                    </span>
-                    <span className="text-yellow-300 mx-2">•</span>
-                    <span className="text-yellow-100">
-                      {t.projected_cut.players_inside} inside, {t.projected_cut.players_at_line} at the
-                      line
+                      (Top 65 + ties)
                     </span>
                   </p>
                 </div>
@@ -799,6 +902,8 @@ export default function TournamentPage() {
                 onPlayerClick={setSelectedPlayerId}
                 selectedPlayerId={selectedPlayerId}
                 course={course}
+                projectedCut={t.projected_cut}
+                cutLineIndex={cutLineIndex}
               />
             )}
           </div>
@@ -879,6 +984,7 @@ export default function TournamentPage() {
               <OnCourseTracker
                 tournament={t}
                 featuredGroup={featuredGroup}
+                allInterestingGroups={interestingGroups}
                 course={course}
                 onPlayerClick={setSelectedPlayerId}
                 selectedPlayerId={selectedPlayerId}
@@ -910,6 +1016,7 @@ export default function TournamentPage() {
           </div>
         </div>
       </div>
+      <LiveTicker events={t?.recent_events} />
     </div>
   )
 }
@@ -928,7 +1035,9 @@ function Leaderboard({
   formatToPar,
   onPlayerClick,
   selectedPlayerId,
-  course
+  course,
+  projectedCut,
+  cutLineIndex
 }) {
   const getScoreColor = (score) => {
     const v = Number(score || 0)
@@ -944,7 +1053,14 @@ function Leaderboard({
       <div className="bg-gradient-to-r from-green-50 to-green-100 px-6 py-4 border-b border-green-200">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-bold text-green-900">Leaderboard</h2>
+            <h2 className="text-xl font-bold text-green-900">
+                Leaderboard
+                {(projectedCut !== undefined && projectedCut !== null) && (
+                    <span className="ml-3 text-sm font-medium text-red-600">
+                        (Projected Cut: {projectedCut > 0 ? '+' : ''}{projectedCut})
+                    </span>
+                )}
+            </h2>
             <p className="text-sm text-green-700 mt-1">{totalCount} players</p>
           </div>
           <div className="flex items-center gap-2">
@@ -1001,12 +1117,17 @@ function Leaderboard({
           <tbody className="divide-y divide-gray-100">
             {rows.map((e, idx) => {
               const position = page * 50 + idx + 1
+              const globalIndex = page * 50 + idx
+              
+              const showCutLine = (globalIndex === cutLineIndex)
+              const isBelowCutLine = (cutLineIndex !== -1) && (globalIndex > cutLineIndex)
+
               return (
+                <React.Fragment key={e.id}>
                 <tr
-                  key={e.id}
                   onClick={() => onPlayerClick && onPlayerClick(e.id)}
                   className={`hover:bg-green-50/50 transition-colors cursor-pointer ${position <= 3 ? 'bg-yellow-50/30' : ''
-                    } ${e.is_human ? 'bg-blue-50/30' : ''}`}
+                    } ${e.is_human ? 'bg-blue-50/30' : ''} ${isBelowCutLine ? 'bg-gray-100 opacity-75' : ''}`}
                 >
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center gap-2">
@@ -1090,6 +1211,16 @@ function Leaderboard({
                     <span className="text-sm text-gray-700">{e.cut ? 'CUT' : ''}</span>
                   </td>
                 </tr>
+                {showCutLine && (
+                    <tr key="cut-line">
+                        <td colSpan="7" className="p-0">
+                            <div className="bg-red-50 border-t-2 border-b-2 border-red-300 border-dashed py-2 text-center text-xs font-bold text-red-600 uppercase tracking-widest">
+                                Projected Cut ({projectedCut > 0 ? '+' : ''}{projectedCut})
+                            </div>
+                        </td>
+                    </tr>
+                )}
+                </React.Fragment>
               )
             })}
           </tbody>
@@ -1654,11 +1785,15 @@ function BigMoversWidget({ rounds }) {
   )
 }
 
-function StatsEmbed({ player, holes, variant = 'small' }) {
+function StatsEmbed({ player, holes, variant = 'small', round = null }) {
   if (!player) return null
   
-  // Calculate minimal stats for sidebar
-  const results = player.hole_results || []
+  // Calculate minimal stats for sidebar or round breakdown
+  const results = (player.hole_results || []).filter(r => {
+      if (round) return Number(r.round_number) === Number(round)
+      return true
+  })
+  
   let totalHoles = 0
   let fairwaysHit = 0
   let fairwaysPossible = 0
@@ -1735,7 +1870,7 @@ function StatsEmbed({ player, holes, variant = 'small' }) {
   )
 }
 
-function OnCourseTracker({ tournament, featuredGroup, course, onPlayerClick, selectedPlayerId }) {
+function OnCourseTracker({ tournament, featuredGroup, allInterestingGroups, course, onPlayerClick, selectedPlayerId }) {
   const parMap = useMemo(() => course ? buildParMap(course) : new Map(), [course])
 
   const getScore = (entry) => {
@@ -1754,14 +1889,11 @@ function OnCourseTracker({ tournament, featuredGroup, course, onPlayerClick, sel
 
   return (
     <CollapsibleCard title="On-Course" color="green" headerRight={
-        <span className="text-[10px] bg-green-200 text-green-800 px-2 py-0.5 rounded-full font-bold">Featured</span>
+        <span className="text-[10px] bg-green-200 text-green-800 px-2 py-0.5 rounded-full font-bold">Featured - Scoreboard</span>
     }>
       <div className="space-y-3">
-        {(tournament.groups || [])
-          .slice()
-          .sort((a, b) => new Date(a.tee_time) - new Date(b.tee_time))
-          .slice(0, 8)
-          .map((g) => (
+          {/* Show the top interesting groups (Dynamic List) or fallback to featured */}
+          {(allInterestingGroups && allInterestingGroups.length > 0 ? allInterestingGroups.slice(0, 6) : [featuredGroup].filter(Boolean)).map((g) => (
             <div
               key={g.id}
               className="bg-white rounded-lg border border-gray-100 shadow-sm overflow-hidden"

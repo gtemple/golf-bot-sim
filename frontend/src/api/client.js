@@ -35,4 +35,12 @@ export const api = {
     apiFetch(`/tournaments/${id}/hole-result/`, { method: 'POST', body: payload }),
   simToEndOfDay: (id) =>
     apiFetch(`/tournaments/${id}/sim-to-end-of-day/`, { method: 'POST' }),
+  getHistory: () => apiFetch('/history/'),
+  
+  // Seasons
+  listSeasons: () => apiFetch('/seasons/'),
+  createSeason: (payload) => apiFetch('/seasons/', { method: 'POST', body: payload }),
+  getSeason: (id) => apiFetch(`/seasons/${id}/`),
+  getSeasonStandings: (id) => apiFetch(`/seasons/${id}/standings/`),
 }
+

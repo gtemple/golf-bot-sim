@@ -6,6 +6,7 @@ import { api } from '../api/client'
 export default function TournamentListPage() {
   const navigate = useNavigate()
   const [tournaments, setTournaments] = useState([])
+  const [seasons, setSeasons] = useState([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
 
@@ -14,9 +15,14 @@ export default function TournamentListPage() {
     ;(async () => {
       try {
         setLoading(true)
-        const data = await api.listTournaments()
+        const [tData, sData] = await Promise.all([
+          api.listTournaments(),
+          api.listSeasons() // Assume api.listSeasons is available
+        ])
         if (!alive) return
-        setTournaments(data)
+        // Filter out tournaments that belong to a season (they are shown in the season card)
+        setTournaments(tData.filter(t => !t.season))
+        setSeasons(sData || [])
       } catch (e) {
         if (!alive) return
         setErr(e.message || String(e))
@@ -55,6 +61,10 @@ export default function TournamentListPage() {
     )
   }
 
+  const handleCreateSeason = async () => {
+    navigate('/season/create')
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 to-green-50 flex items-center justify-center">
@@ -88,17 +98,103 @@ export default function TournamentListPage() {
             </p>
           </div>
           
-          <button 
-            onClick={() => navigate('/create')}
-            className="px-6 py-3 bg-white hover:bg-gray-100 text-green-900 rounded-xl font-bold shadow-lg transition-all hover:transform hover:scale-105 flex items-center gap-2"
-          >
-            <Plus className="w-5 h-5" />
-            New Tournament
-          </button>
+          <div className="flex gap-3">
+             <button 
+                onClick={handleCreateSeason}
+                className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold shadow-lg transition-all hover:transform hover:scale-105 flex items-center gap-2"
+             >
+                <Calendar className="w-5 h-5" />
+                New Season
+             </button>
+             <button 
+                onClick={() => navigate('/history')}
+                className="px-6 py-3 bg-green-700/50 hover:bg-green-700 hover:text-white text-green-100 rounded-xl font-bold shadow-lg transition-all hover:transform hover:scale-105 flex items-center gap-2 border border-green-600"
+              >
+                <Trophy className="w-5 h-5" />
+                History
+              </button>
+              <button 
+                onClick={() => navigate('/create')}
+                className="px-6 py-3 bg-white hover:bg-gray-100 text-green-900 rounded-xl font-bold shadow-lg transition-all hover:transform hover:scale-105 flex items-center gap-2"
+              >
+                <Plus className="w-5 h-5" />
+                New Tournament
+              </button>
+          </div>
         </div>
       </div>
 
       <div className="max-w-7xl mx-auto px-6 py-8">
+        
+        {/* Seasons Section */}
+        {seasons.length > 0 && (
+            <div className="mb-12">
+                <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                    <Calendar className="text-blue-600"/> Active Seasons
+                </h3>
+                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                 {seasons.map(season => {
+                     const events = season.tournaments || []
+                     const finishedCount = events.filter(e => e.status === 'finished').length
+                     const currentEvent = events.find(e => e.status !== 'finished')
+                     
+                     let statusText = "Season Finished"
+                     if (currentEvent) {
+                        const roundInfo = currentEvent.status === 'in_progress' ? `(Round ${currentEvent.current_round})` : ''
+                        statusText = `Event ${currentEvent.season_order} of ${events.length}: ${currentEvent.name} ${roundInfo}`
+                     } else if (events.length === 0) {
+                        statusText = "Setup In Progress"
+                     }
+
+                     return (
+                         <div key={season.id} className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow flex flex-col">
+                            <div className="p-6 flex-grow">
+                                <div className="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h3 className="text-xl font-bold text-gray-900">{season.name}</h3>
+                                        <p className="text-sm text-blue-600 font-medium mt-1">
+                                            {statusText}
+                                        </p>
+                                    </div>
+                                    <div className="text-right">
+                                        <span className="text-2xl font-bold text-gray-800">{Math.round((finishedCount / Math.max(events.length, 1)) * 100)}%</span>
+                                        <div className="text-xs text-gray-500 uppercase font-bold">Complete</div>
+                                    </div>
+                                </div>
+                                
+                                {season.leaders && season.leaders.length > 0 && (
+                                    <div className="mb-6 bg-gray-50 rounded-lg p-3">
+                                        <h4 className="text-xs font-bold text-gray-400 uppercase mb-2">Season Leaders</h4>
+                                        <div className="space-y-2">
+                                            {season.leaders.map((l, idx) => (
+                                                <div key={idx} className="flex justify-between items-center text-sm">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`w-5 h-5 flex items-center justify-center rounded-full text-[10px] font-bold ${idx===0 ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-200 text-gray-600'}`}>
+                                                            {idx + 1}
+                                                        </span>
+                                                        <span className="font-medium text-gray-900">{l.name}</span>
+                                                    </div>
+                                                    <span className="font-bold text-gray-600">{l.points} pts</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                <button 
+                                    onClick={() => navigate(`/season/${season.id}`)}
+                                    className="w-full py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+                                >
+                                    Continue Season
+                                </button>
+                            </div>
+                         </div>
+                     )
+                 })}
+                 </div>
+            </div>
+        )}
+
         {err && (
           <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg mb-6">
             {err}
